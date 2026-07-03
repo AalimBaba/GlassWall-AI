@@ -4,18 +4,21 @@
 
 [Live demo](https://aalimbaba.github.io/GlassWall-AI/) · [Repository](https://github.com/AalimBaba/GlassWall-AI)
 
-GlassWall AI is a portfolio-grade security prototype focused on the analog gap in conventional DLP: sensitive information can still be photographed or viewed after it reaches a screen. The interactive frontend demonstrates how a confidential interface can react to a detected phone, unauthorized observer, or shoulder-surfing risk with immediate blur, warning, lockdown, confidence scoring, and local event logging.
+GlassWall AI is a portfolio-grade security prototype focused on the analog gap in conventional DLP: sensitive information can still be photographed or viewed after it reaches a screen. The interactive frontend demonstrates how a protected interface can react to a phone, unauthorized observer, or shoulder-surfing risk with immediate blur, warning, lockdown, confidence scoring, and local event logging.
 
-The public GitHub Pages experience is deliberately a safe, deterministic simulation. It does not claim to run camera inference in the browser. The repository also contains real, unit-tested Python reasoning modules intended to sit behind future YOLO, MediaPipe, WebRTC, FastAPI, and Azure adapters.
+The public GitHub Pages experience defaults to a safe, deterministic **Simulation Demo**. An explicitly opt-in **Camera Assist / Experimental** mode runs TensorFlow.js COCO-SSD locally in the browser. It is a lightweight object-detection aid—not face recognition, gaze tracking, YOLO, MediaPipe, or production security. The repository also contains real, unit-tested Python reasoning modules intended to sit behind future YOLO, MediaPipe, WebRTC, FastAPI, and Azure adapters.
 
 ## Live demo capabilities
 
-- Responsive confidential enterprise dashboard with synthetic financial, access, customer-risk, alert, and compliance data
-- Phone-camera, second-observer, and shoulder-surfing threat simulations
+- Responsive protected dashboard containing only clearly labeled fictional demo data
+- Explicitly user-triggered phone, observer, and shoulder-surfing simulations
 - Secure, Warning, and Lockdown states with immediate privacy blur
 - Threat reason, confidence, timestamp, remediation, timeline, and reset flow
+- Optional webcam preview with local COCO-SSD detection of `cell phone` and `person` labels
+- Temporal smoothing: a phone must persist for 1.0 second; phone plus multiple people must overlap for 1.5 seconds
+- Confidence thresholds, reset cooldown, model-loading safety, and no-camera/no-frame safeguards
 - Architecture, technology-status, feature, about, and CV portfolio sections
-- Static build with no backend, camera, credentials, or Azure dependency
+- Static build with no backend, credentials, or Azure dependency; camera permission is optional
 
 ## Repository architecture
 
@@ -42,7 +45,8 @@ The public GitHub Pages experience is deliberately a safe, deterministic simulat
 - **Spatial Threat Engine** — hand-built immutable vectors, rays, planes, and rectangles; evaluates whether a gaze ray intersects a protected screen region in O(1) per observer.
 - **Temporal Interval Tree Analyzer** — thread-safe augmented AVL tree with O(log N) insertion and O(log N + K) overlap queries; correlates distinct signals without treating a single-frame detection as confirmed evidence.
 - **Dynamic Threat State Machine** — validated and auditable transitions through secure, detection, warning, lockdown, recovery, and restored states.
-- **Frontend threat simulator** — a dependency-free static runtime using React state to demonstrate response behavior safely.
+- **Frontend threat simulator** — explicit manual controls using React state to demonstrate response behavior safely.
+- **Experimental camera assist** — opt-in TensorFlow.js COCO-SSD inference running locally against the webcam stream. It escalates only from qualifying model output sustained across time, never from timers or random values.
 
 Command-based remediation, stream strategies, actual CV workers, a production FastAPI service, and the Azure threat ledger are architecture-ready or planned integrations—not represented as implemented production systems.
 
@@ -50,7 +54,8 @@ Command-based remediation, stream strategies, actual CV workers, a production Fa
 
 | Area | Implemented | Architecture ready / planned |
 | --- | --- | --- |
-| Frontend | React, TypeScript, Vite, responsive CSS, static Pages export | WebRTC camera capture |
+| Frontend | React, TypeScript, Vite, responsive CSS, static Pages export, WebRTC webcam preview | Production capture service |
+| Browser detection | TensorFlow.js, COCO-SSD, confidence thresholds, temporal persistence, cooldown | Face identity, gaze estimation |
 | Core | Python, 3D ray-casting, augmented AVL interval tree, state graph, thread-safe analysis | Command and strategy patterns, LRU inference cache |
 | AI / API | — | OpenCV, MediaPipe Face Mesh, YOLO, FastAPI, WebSockets |
 | Cloud | GitHub Pages workflow | Azure Container Apps, Event Grid, Functions, Cosmos DB |
@@ -84,7 +89,7 @@ python -m pip install -r requirements.txt
 python -m pytest -v
 ```
 
-The core runtime itself intentionally has no third-party dependency; the root requirements file contains test tooling only.
+The Python reasoning core itself intentionally has no third-party runtime dependency; the root requirements file contains test tooling only.
 
 ## Deploy to GitHub Pages
 
@@ -109,7 +114,25 @@ Webcam / CCTV feed
   → Azure threat logging
 ```
 
-Only the reasoning core and frontend response simulator are currently implemented. The remaining stages show the intended integration boundary.
+The reasoning core, frontend response simulator, webcam preview, and lightweight COCO-SSD object assistance are implemented. MediaPipe gaze tracking, YOLO inference, FastAPI streaming, and Azure logging remain production-architecture integration points.
+
+## Detection modes and privacy
+
+### Simulation Demo (default)
+
+- Does not request camera access or analyze frames.
+- Never creates an event automatically.
+- Warning or Lockdown occurs only when the user presses a clearly labeled simulation control.
+
+### Camera Assist / Experimental (opt-in)
+
+- Requests webcam permission only after the user selects the mode.
+- Processes frames locally in the browser with the free COCO-SSD model; frames are not uploaded by this app.
+- Treats `cell phone`/`phone` at ≥55% confidence sustained for 1.0 second as Warning evidence.
+- Requires a phone plus more than one `person` at ≥65% confidence to overlap for 1.5 seconds before Lockdown.
+- Never triggers while the camera is off, permission is denied, the model is loading, a frame is unavailable, or qualifying objects are absent.
+
+COCO-SSD can miss objects or classify them incorrectly. Camera Assist is an honest engineering demonstration, not a certified DLP control. A real enterprise deployment would connect this UI to the FastAPI + MediaPipe + YOLO pipeline described above.
 
 ## CV Project Description
 
@@ -125,4 +148,4 @@ Short version:
 
 ## Security and data note
 
-All dashboard identities, values, and events are fictional. The static demo requests no camera permission, stores no personal data, sends no telemetry, includes no secrets, and does not require cloud services.
+All dashboard identities, values, and events are fictional. Simulation mode requests no camera permission. Experimental camera mode is opt-in and processes frames locally; the app stores no frames or personal data and sends no telemetry. TensorFlow.js downloads the open model assets when camera assistance is started. The project includes no secrets and does not require cloud services.
