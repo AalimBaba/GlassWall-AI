@@ -1,0 +1,4 @@
+# Module 1 (Spatial Threat Engine) has zero third-party runtime
+# dependencies by design. Test tooling only, for now.
+pytest>=8.0.0
+pytest-cov>=5.0.0
