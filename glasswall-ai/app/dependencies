@@ -1,0 +1,15 @@
+# Dependency Injection Configurations
+
+from fastapi import Depends
+from app.core.models import UserModel
+from app.auth.jwt_handler import JWTHandler
+from app.services.user_service import UserService
+
+def get_jwt_handler() -> JWTHandler:
+    return JWTHandler()
+
+def get_user_service(jwt_handler: JWTHandler = Depends(get_jwt_handler)) -> UserService:
+    return UserService(jwt_handler=jwt_handler)
+
+def get_current_user(user_service: UserService = Depends(get_user_service)) -> UserModel:
+    return user_service.get_current_user()

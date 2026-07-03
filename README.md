@@ -2,9 +2,7 @@
 
 **Zero-Trust Optical Data Loss Prevention for secure workspaces**
 
-[Live demo](https://yourusername.github.io/glasswall-ai/) · [Repository](https://github.com/yourusername/glasswall-ai)
-
-> Replace `yourusername` in the links above and in `src/App.tsx` before sharing the project.
+[Live demo](https://aalimbaba.github.io/GlassWall-AI/) · [Repository](https://github.com/AalimBaba/GlassWall-AI)
 
 GlassWall AI is a portfolio-grade security prototype focused on the analog gap in conventional DLP: sensitive information can still be photographed or viewed after it reaches a screen. The interactive frontend demonstrates how a confidential interface can react to a detected phone, unauthorized observer, or shoulder-surfing risk with immediate blur, warning, lockdown, confidence scoring, and local event logging.
 
@@ -92,7 +90,7 @@ The core runtime itself intentionally has no third-party dependency; the root re
 
 1. Create a GitHub repository and push this project with the default branch named `main`.
 2. In **Settings → Pages**, select **GitHub Actions** as the source.
-3. Replace the placeholder profile/repository URLs in `src/App.tsx` and this README.
+3. Replace the optional portfolio placeholder in `src/App.tsx` when your portfolio is available.
 4. Push to `main`, or run **Deploy to GitHub Pages** manually from the Actions tab.
 
 The workflow installs from `package-lock.json`, runs the strict TypeScript production build, uploads `dist`, and deploys it with GitHub's official Pages actions. Vite uses relative asset paths, so both project Pages URLs and custom domains work without a repository-name edit.

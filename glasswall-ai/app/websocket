@@ -1,0 +1,61 @@
+# File: /glasswall-ai/glasswall-ai/app/websocket/__init__.py
+
+# This file is intentionally left blank.
+
+# File: /glasswall-ai/glasswall-ai/app/websocket/websocket_manager.py
+
+from fastapi import WebSocket, WebSocketDisconnect
+from typing import List, Dict
+import asyncio
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+class WebSocketManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logging.info(f"WebSocket connection established: {websocket.client}")
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        self.active_connections.remove(websocket)
+        logging.info(f"WebSocket connection closed: {websocket.client}")
+
+    async def send_message(self, message: str) -> None:
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+    async def broadcast(self, message: str) -> None:
+        await self.send_message(message)
+
+    async def receive_messages(self, websocket: WebSocket) -> None:
+        try:
+            while True:
+                data = await websocket.receive_text()
+                logging.info(f"Message received: {data}")
+                await self.broadcast(data)
+        except WebSocketDisconnect:
+            self.disconnect(websocket)
+
+# File: /glasswall-ai/glasswall-ai/app/websocket/routes.py
+
+from fastapi import APIRouter, WebSocket
+from .websocket_manager import WebSocketManager
+
+router = APIRouter()
+manager = WebSocketManager()
+
+@router.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    await manager.receive_messages(websocket)
+
+# File: /glasswall-ai/glasswall-ai/app/websocket/dependencies.py
+
+from .websocket_manager import WebSocketManager
+
+def get_websocket_manager() -> WebSocketManager:
+    return WebSocketManager()
