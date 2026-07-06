@@ -8,8 +8,11 @@ import {
 
 type Threat = { mode: 'Warning' | 'Lockdown'; reason: string; detail: string; confidence: number; action: string; icon: typeof Smartphone }
 type Event = { id: number; title: string; time: string; confidence?: number; action: string; mode: string }
-type DetectionMode = 'simulation' | 'camera'
-type CameraState = 'off' | 'requesting' | 'loading' | 'scanning' | 'error'
+type DetectionMode = 'real' | 'simulation'
+type CameraState = 'off' | 'requesting' | 'scanning' | 'error'
+type BackendState = 'connecting' | 'connected' | 'offline'
+type BackendDetection = { type: 'FACE' | 'PHONE' | 'CAMERA'; confidence: number; bbox: [number, number, number, number] }
+type AnalysisResult = { state: 'SECURE' | 'WARNING' | 'LOCKDOWN'; detections: BackendDetection[]; faces_count: number; phone_detected: boolean; threat_reason: string | null; action: 'NONE' | 'BLUR' | 'LOCKDOWN'; timestamp: number; phone_model_loaded: boolean; error?: string }
 
 const LINKS = {
   github: 'https://github.com/AalimBaba/GlassWall-AI',
@@ -18,15 +21,9 @@ const LINKS = {
 
 const threats: Record<string, Threat> = {
   phone: { mode: 'Warning', reason: 'Simulated phone threat', detail: 'User manually triggered a phone-camera scenario.', confidence: 90, action: 'Privacy blur enabled', icon: Smartphone },
-  observer: { mode: 'Warning', reason: 'Simulated unauthorized observer', detail: 'User manually triggered a second-observer scenario.', confidence: 90, action: 'Privacy blur enabled', icon: UserRoundX },
-  shoulder: { mode: 'Lockdown', reason: 'Simulated shoulder surfing', detail: 'User manually triggered a high-risk gaze-overlap scenario.', confidence: 95, action: 'Sensitive data obscured', icon: Eye },
+  observer: { mode: 'Warning', reason: 'Simulated second face', detail: 'User manually triggered a second-observer scenario.', confidence: 90, action: 'Privacy blur enabled', icon: UserRoundX },
+  shoulder: { mode: 'Lockdown', reason: 'Simulated lockdown', detail: 'User manually triggered a full-lockdown scenario.', confidence: 95, action: 'Sensitive data obscured', icon: LockKeyhole },
 }
-
-const pipeline = [
-  ['Webcam / CCTV', Camera], ['Local CV', BrainCircuit], ['YOLO detection', Smartphone],
-  ['Face & gaze', ScanFace], ['Spatial ray-cast', Network], ['Interval analysis', Activity],
-  ['Threat state', Workflow], ['Blur / lockdown', LockKeyhole], ['Azure ledger', Cloud],
-] as const
 
 const features = [
   ['Physical DLP concept', 'Closes the analog gap that traditional file monitoring cannot see.', Eye],
@@ -41,9 +38,9 @@ const modules = [
   ['01', 'Spatial Threat Engine', 'Projects an observer’s gaze ray into a sensitive screen plane and evaluates intersection geometry.', 'Implemented · Python'],
   ['02', 'Temporal Interval Analyzer', 'Uses an augmented AVL interval tree to correlate independent signals across time windows.', 'Implemented · Python'],
   ['03', 'Dynamic Threat State Machine', 'Controls validated movement through secure, warning, lockdown, and recovery states.', 'Implemented · Python'],
-  ['04', 'Command-Based Remediation', 'Decouples blur, lock, warn, revoke, and audit actions for reversible response.', 'Architecture ready'],
-  ['05', 'Stream Strategy Layer', 'Selects webcam, CCTV, or prerecorded inference streams behind a stable interface.', 'Planned integration'],
-  ['06', 'Azure Threat Ledger', 'Persists immutable threat evidence through an event-driven cloud pipeline.', 'Architecture ready'],
+  ['04', 'FastAPI Frame Service', 'Receives compressed JPEG frames over WebSocket and returns a structured detection contract.', 'Implemented · Python'],
+  ['05', 'OpenCV Face Detector', 'Runs the bundled frontal-face cascade and reports actual face boxes and detector scores.', 'Implemented · Python'],
+  ['06', 'Phone Detection Adapter', 'Reserved for a local YOLO or COCO model; disabled honestly while no model file is installed.', 'Model required'],
 ]
 
 function now() { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }
@@ -52,19 +49,20 @@ export default function App() {
   const [active, setActive] = useState<Threat | null>(null)
   const [events, setEvents] = useState<Event[]>([{ id: 1, title: 'Session initialized', time: now(), action: 'Secure — no active threat', mode: 'Secure' }])
   const [menu, setMenu] = useState(false)
-  const [detectionMode, setDetectionMode] = useState<DetectionMode>('simulation')
+  const [detectionMode, setDetectionMode] = useState<DetectionMode>('real')
+  const [backendState, setBackendState] = useState<BackendState>('connecting')
   const [cameraState, setCameraState] = useState<CameraState>('off')
-  const [cameraMessage, setCameraMessage] = useState('Camera not analyzed yet')
+  const [cameraMessage, setCameraMessage] = useState('Camera inactive — no threat detected')
+  const [detections, setDetections] = useState<BackendDetection[]>([])
+  const [phoneModelLoaded, setPhoneModelLoaded] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const modelRef = useRef<{ detect: (input: HTMLVideoElement) => Promise<Array<{ class: string; score: number; bbox: number[] }>> } | null>(null)
-  const scanTimerRef = useRef<number | null>(null)
-  const phoneSinceRef = useRef<number | null>(null)
-  const overlapSinceRef = useRef<number | null>(null)
-  const lastCameraThreatRef = useRef<'phone' | 'overlap' | null>(null)
-  const cooldownUntilRef = useRef(0)
-  const cameraSessionRef = useRef(0)
-  const inferenceBusyRef = useRef(false)
+  const socketRef = useRef<WebSocket | null>(null)
+  const frameTimerRef = useRef<number | null>(null)
+  const awaitingResultRef = useRef(false)
+  const lastBackendStateRef = useRef<'SECURE' | 'WARNING' | 'LOCKDOWN'>('SECURE')
+  const backendUrl = import.meta.env.VITE_BACKEND_WS_URL || 'ws://127.0.0.1:8000/ws/analyze'
 
   const simulate = (key: keyof typeof threats) => {
     if (detectionMode !== 'simulation') return
@@ -75,101 +73,95 @@ export default function App() {
   }
   const reset = () => {
     setActive(null)
-    phoneSinceRef.current = null
-    overlapSinceRef.current = null
-    lastCameraThreatRef.current = null
-    cooldownUntilRef.current = Date.now() + 3000
+    setDetections([])
+    lastBackendStateRef.current = 'SECURE'
+    if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify({ type: 'reset', timestamp: Date.now() }))
     setEvents(old => [{ id: Date.now(), title: 'Session reset', time: now(), action: 'Returned to secure state; 3s cooldown active', mode: 'Secure' }, ...old].slice(0, 6))
     if (cameraState === 'scanning') setCameraMessage('Camera active — no threat detected')
   }
 
   const stopCamera = () => {
-    cameraSessionRef.current += 1
-    if (scanTimerRef.current) window.clearInterval(scanTimerRef.current)
-    scanTimerRef.current = null
+    if (frameTimerRef.current) window.clearInterval(frameTimerRef.current)
+    frameTimerRef.current = null
     streamRef.current?.getTracks().forEach(track => track.stop())
     streamRef.current = null
-    modelRef.current = null
+    awaitingResultRef.current = false
     setCameraState('off')
     setCameraMessage('Camera not analyzed yet')
-    phoneSinceRef.current = null
-    overlapSinceRef.current = null
-    lastCameraThreatRef.current = null
+    setDetections([])
   }
 
-  const runDetection = async () => {
+  const sendFrame = () => {
     const video = videoRef.current
-    const model = modelRef.current
-    if (!video || !model || video.readyState < 2 || Date.now() < cooldownUntilRef.current || inferenceBusyRef.current) return
-    inferenceBusyRef.current = true
-    try {
-      const predictions = await model.detect(video)
-      const phone = predictions.filter(p => /cell phone|phone/i.test(p.class) && p.score >= .55).sort((a, b) => b.score - a.score)[0]
-      const persons = predictions.filter(p => p.class === 'person' && p.score >= .65)
-      const timestamp = Date.now()
-      phoneSinceRef.current = phone ? (phoneSinceRef.current ?? timestamp) : null
-      overlapSinceRef.current = phone && persons.length > 1 ? (overlapSinceRef.current ?? timestamp) : null
-      const phoneDuration = phoneSinceRef.current ? timestamp - phoneSinceRef.current : 0
-      const overlapDuration = overlapSinceRef.current ? timestamp - overlapSinceRef.current : 0
-
-      if (phone && persons.length > 1 && overlapDuration >= 1500) {
-        setCameraMessage(`Persistent phone + ${persons.length} people detected`)
-        if (lastCameraThreatRef.current !== 'overlap') {
-          const confidence = Math.round(Math.min(phone.score, ...persons.map(p => p.score)) * 100)
-          const threat: Threat = { mode: 'Lockdown', reason: 'Camera-assisted overlap detected', detail: `A phone and ${persons.length} people persisted together for ${(overlapDuration / 1000).toFixed(1)}s.`, confidence, action: 'Sensitive data obscured', icon: ShieldAlert }
-          setActive(threat); lastCameraThreatRef.current = 'overlap'
-          setEvents(old => [{ id: timestamp, title: `Camera: phone + multiple people detected for ${(overlapDuration / 1000).toFixed(1)}s`, time: now(), confidence, action: threat.action, mode: threat.mode }, ...old].slice(0, 6))
-        }
-      } else if (phone && phoneDuration >= 1000) {
-        setCameraMessage(`Cell phone persisted for ${(phoneDuration / 1000).toFixed(1)}s at ${Math.round(phone.score * 100)}%`)
-        if (lastCameraThreatRef.current !== 'phone') {
-          const confidence = Math.round(phone.score * 100)
-          const threat: Threat = { mode: 'Warning', reason: 'Camera-assisted phone detection', detail: `COCO-SSD classified a cell phone for ${(phoneDuration / 1000).toFixed(1)}s.`, confidence, action: 'Privacy blur enabled', icon: Smartphone }
-          setActive(threat); lastCameraThreatRef.current = 'phone'
-          setEvents(old => [{ id: timestamp, title: `Camera: cell phone detected for ${(phoneDuration / 1000).toFixed(1)}s`, time: now(), confidence, action: threat.action, mode: threat.mode }, ...old].slice(0, 6))
-        }
-      } else {
-        setCameraMessage(persons.length ? `Camera active — ${persons.length} person${persons.length > 1 ? 's' : ''} visible, no threat detected` : 'Camera active — no threat detected')
-        if (!phone) lastCameraThreatRef.current = null
-      }
-    } catch {
-      setCameraMessage('Camera frame could not be analyzed; no threat triggered')
-    } finally {
-      inferenceBusyRef.current = false
-    }
+    const canvas = canvasRef.current
+    const socket = socketRef.current
+    if (!video || !canvas || video.readyState < 2 || !socket || socket.readyState !== WebSocket.OPEN || awaitingResultRef.current) return
+    canvas.width = 480
+    canvas.height = Math.round(480 * video.videoHeight / video.videoWidth) || 360
+    const context = canvas.getContext('2d')
+    if (!context) return
+    context.drawImage(video, 0, 0, canvas.width, canvas.height)
+    awaitingResultRef.current = true
+    socket.send(JSON.stringify({ frame: canvas.toDataURL('image/jpeg', .7), timestamp: Date.now() }))
   }
 
   const startCamera = async () => {
     stopCamera()
-    const sessionId = cameraSessionRef.current
-    setDetectionMode('camera')
+    setDetectionMode('real')
+    if (backendState !== 'connected') { setCameraState('error'); setCameraMessage('Backend not connected. Real detection unavailable.'); return }
     setCameraState('requesting')
     setCameraMessage('Waiting for webcam permission…')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
-      if (sessionId !== cameraSessionRef.current) { stream.getTracks().forEach(track => track.stop()); return }
       streamRef.current = stream
       if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play() }
-      setCameraState('loading'); setCameraMessage('Camera active — loading COCO-SSD model…')
-      await import('@tensorflow/tfjs')
-      const cocoSsd = await import('@tensorflow-models/coco-ssd')
-      const model = await cocoSsd.load({ base: 'lite_mobilenet_v2' })
-      if (sessionId !== cameraSessionRef.current || !streamRef.current) return
-      modelRef.current = model
-      setCameraState('scanning'); setCameraMessage('Camera active — no threat detected')
-      scanTimerRef.current = window.setInterval(runDetection, 350)
+      setCameraState('scanning')
+      setCameraMessage('Camera active — no threat detected')
+      frameTimerRef.current = window.setInterval(sendFrame, 400)
     } catch (error) {
-      stopCamera(); setDetectionMode('camera'); setCameraState('error')
-      setCameraMessage(error instanceof Error && error.name === 'NotAllowedError' ? 'Camera permission denied — no analysis is running' : 'Camera or detection model unavailable — no analysis is running')
+      stopCamera(); setDetectionMode('real'); setCameraState('error')
+      setCameraMessage(error instanceof Error && error.name === 'NotAllowedError' ? 'Camera permission denied — no analysis is running' : 'Camera unavailable — no analysis is running')
     }
   }
 
   const chooseSimulation = () => { stopCamera(); setDetectionMode('simulation'); setActive(null) }
+  const chooseReal = () => { setDetectionMode('real'); setActive(null); setCameraMessage(backendState === 'connected' ? 'Camera inactive — no threat detected' : 'Backend not connected. Real detection unavailable.') }
+
+  const connectBackend = () => {
+    socketRef.current?.close()
+    setBackendState('connecting')
+    const socket = new WebSocket(backendUrl)
+    socketRef.current = socket
+    socket.onopen = () => { setBackendState('connected'); setCameraMessage('Backend connected — start camera for real detection') }
+    socket.onmessage = event => {
+      awaitingResultRef.current = false
+      let result: AnalysisResult
+      try { result = JSON.parse(event.data) as AnalysisResult } catch { return }
+      if (result.error) { setCameraMessage(`Backend rejected frame: ${result.error}`); return }
+      setDetections(result.detections)
+      setPhoneModelLoaded(result.phone_model_loaded)
+      const faceText = `${result.faces_count} face${result.faces_count === 1 ? '' : 's'} visible`
+      if (result.state === 'SECURE') {
+        setActive(null)
+        setCameraMessage(`Camera active — ${faceText}, no threat detected`)
+      } else {
+        const confidence = Math.round(Math.max(0, ...result.detections.map(item => item.confidence)) * 100)
+        const threat: Threat = { mode: result.state === 'LOCKDOWN' ? 'Lockdown' : 'Warning', reason: result.threat_reason || 'Persistent visual threat', detail: `${faceText}. State returned by the local OpenCV temporal engine.`, confidence, action: result.action === 'LOCKDOWN' ? 'Sensitive data obscured' : 'Privacy blur enabled', icon: result.phone_detected ? Smartphone : UserRoundX }
+        setActive(threat)
+        setCameraMessage(`${result.state}: ${result.threat_reason}`)
+        if (lastBackendStateRef.current !== result.state) setEvents(old => [{ id: result.timestamp, title: `Real detection: ${result.threat_reason}`, time: now(), confidence, action: threat.action, mode: threat.mode }, ...old].slice(0, 8))
+      }
+      lastBackendStateRef.current = result.state
+    }
+    socket.onerror = () => { setBackendState('offline'); setCameraMessage('Backend not connected. Real detection unavailable.') }
+    socket.onclose = () => { setBackendState('offline'); awaitingResultRef.current = false; setCameraMessage('Backend not connected. Real detection unavailable.') }
+  }
 
   useEffect(() => {
     const close = () => setMenu(false)
     window.addEventListener('resize', close)
-    return () => { window.removeEventListener('resize', close); if (scanTimerRef.current) window.clearInterval(scanTimerRef.current); streamRef.current?.getTracks().forEach(track => track.stop()) }
+    connectBackend()
+    return () => { window.removeEventListener('resize', close); if (frameTimerRef.current) window.clearInterval(frameTimerRef.current); streamRef.current?.getTracks().forEach(track => track.stop()); socketRef.current?.close() }
   }, [])
 
   return <div className="app">
@@ -190,22 +182,22 @@ export default function App() {
         <div className="hero-copy reveal">
           <div className="eyebrow"><span className="live-dot"/> Zero-trust optical security prototype</div>
           <h1>The last line of defense is <em>what’s on screen.</em></h1>
-          <p>GlassWall AI detects physical screen-exfiltration risks—phone photography, shoulder surfing, and unauthorized observers—then instantly protects sensitive interfaces.</p>
+          <p>GlassWall AI streams webcam frames to a local FastAPI + OpenCV pipeline, verifies persistent second-observer risk, and protects sensitive interfaces in real time.</p>
           <div className="hero-actions">
             <a className="button primary" href="#demo"><Zap size={17}/> Launch live demo</a>
             <a className="button secondary" href="#architecture">View architecture <ArrowRight size={17}/></a>
           </div>
           <div className="hero-proof">
-            <span><Check/> Browser-safe simulation</span><span><Check/> No backend required</span><span><Check/> Open architecture</span>
+            <span><Check/> Real OpenCV faces</span><span><Check/> Temporal state engine</span><span><Check/> Honest simulation fallback</span>
           </div>
         </div>
         <div className="hero-visual">
           <div className="radar">
             <div className="radar-ring r1"/><div className="radar-ring r2"/><div className="radar-ring r3"/>
             <div className="scan-line"/><div className="radar-core"><Fingerprint size={42}/><b>PROTECTED</b><small>OPTICAL PERIMETER</small></div>
-            <div className="signal s1"><Smartphone/><span>Device detection</span><b>Opt-in</b></div>
-            <div className="signal s2"><ScanFace/><span>Observer logic</span><b>Simulated</b></div>
-            <div className="signal s3"><Eye/><span>Gaze tracking</span><b>Architecture</b></div>
+            <div className="signal s1"><Smartphone/><span>Phone model</span><b>Required</b></div>
+            <div className="signal s2"><ScanFace/><span>Face detection</span><b>Implemented</b></div>
+            <div className="signal s3"><Activity/><span>Temporal policy</span><b>Active</b></div>
           </div>
         </div>
       </section>
@@ -215,19 +207,19 @@ export default function App() {
       <section className="section shell" id="demo">
         <SectionHead kicker="INTERACTIVE PROTOTYPE" title="Put the dashboard under pressure." text="Choose an explicit simulation or opt in to experimental, browser-side object detection. Nothing triggers automatically at startup." />
         <div className="mode-panel">
-          <div><span>DETECTION MODE</span><b>{detectionMode === 'simulation' ? 'Mode: Simulation Demo' : 'Mode: Camera Assist Experimental'}</b><small>{detectionMode === 'simulation' ? 'Manual scenarios only — no camera or automatic analysis.' : 'Local COCO-SSD assistance — experimental and not production security.'}</small></div>
-          <div className="mode-switch"><button className={detectionMode === 'simulation' ? 'selected' : ''} onClick={chooseSimulation}><Zap/> Simulation Demo</button><button className={detectionMode === 'camera' ? 'selected' : ''} onClick={startCamera}><Camera/> Camera Assist / Experimental</button></div>
+          <div><span>DETECTION MODE</span><b>{detectionMode === 'simulation' ? 'Simulation Mode — manual triggers only' : 'Real Camera Mode'}</b><small>{detectionMode === 'simulation' ? 'No camera or automatic analysis.' : backendState === 'connected' ? 'FastAPI + OpenCV backend connected.' : 'Backend not connected. Real detection unavailable.'}</small></div>
+          <div className="mode-switch"><button className={detectionMode === 'real' ? 'selected' : ''} onClick={chooseReal}><Camera/> Real Camera Mode</button><button className={detectionMode === 'simulation' ? 'selected' : ''} onClick={chooseSimulation}><Zap/> Simulation Mode</button></div>
         </div>
         <div className={`camera-panel ${detectionMode === 'simulation' ? 'camera-hidden' : ''}`}>
-          <div className="camera-view"><video ref={videoRef} muted playsInline/><div className="camera-corners"/><span className={`camera-live ${cameraState}`}><i/>{cameraState === 'scanning' ? 'LOCAL ANALYSIS ACTIVE' : cameraState.toUpperCase()}</span></div>
-          <div className="camera-info"><div className="kicker">OPTIONAL CAMERA ASSIST</div><h3>Experimental local object detection</h3><p>{cameraMessage}</p><div className="camera-rules"><span><Check/> Phone ≥55% for 1.0s → Warning</span><span><Check/> Phone + 2 people for 1.5s → Lockdown</span><span><Check/> No frame or model → no threat</span></div><button onClick={stopCamera}><X/> Stop camera</button></div>
+          <div className="camera-view"><video ref={videoRef} muted playsInline/><canvas ref={canvasRef} hidden/><div className="camera-corners"/><span className={`camera-live ${cameraState}`}><i/>{cameraState === 'scanning' ? 'REAL FRAME ANALYSIS ACTIVE' : cameraState.toUpperCase()}</span></div>
+          <div className="camera-info"><div className="kicker">LOCAL REAL-TIME PIPELINE</div><h3>FastAPI + OpenCV face detection</h3><p>{cameraMessage}</p><div className="backend-badges"><span className={backendState}><i/>Backend: {backendState}</span><span className={phoneModelLoaded ? 'connected' : 'offline'}><i/>Phone model: {phoneModelLoaded ? 'loaded' : 'not loaded'}</span></div><div className="camera-rules"><span><Check/> Second face 1.5s → Warning</span><span><Check/> Second face 3.0s → Lockdown</span><span><Check/> Clear scene 2.0s → Secure</span></div>{detections.length > 0 && <div className="active-detections">{detections.map((item, index) => <span key={`${item.type}-${index}`}>{item.type} · {Math.round(item.confidence * 100)}% · [{item.bbox.join(', ')}]</span>)}</div>}<div className="camera-actions">{cameraState !== 'scanning' ? <button onClick={startCamera} disabled={backendState !== 'connected'}><Camera/> Start real camera</button> : <button onClick={stopCamera}><X/> Stop camera</button>}{backendState !== 'connected' && <button onClick={connectBackend}><RefreshCw/> Retry backend</button>}</div></div>
         </div>
         <div className={`demo-shell ${active ? active.mode.toLowerCase() : 'secure'}`}>
           <div className="demo-topbar">
             <div><span className="mini-logo"><Shield size={15}/></span><b>MERIDIAN</b><span className="classified">INTERNAL · CONFIDENTIAL</span></div>
             <div className="status-cluster"><span className="pulse"/><span>SECURITY MODE</span><b>{active?.mode.toUpperCase() || 'SECURE'}</b></div>
           </div>
-          {!active && <div className="secure-banner"><ShieldCheck/><div><b>No active threat detected</b><span>{detectionMode === 'camera' ? cameraMessage : 'Camera not analyzed yet'}</span></div><strong>{detectionMode === 'simulation' ? 'SIMULATION MODE' : 'CAMERA ASSIST · EXPERIMENTAL'}</strong></div>}
+          {!active && <div className="secure-banner"><ShieldCheck/><div><b>No active threat detected</b><span>{detectionMode === 'real' ? cameraMessage : 'Camera inactive — manual simulation only'}</span></div><strong>{detectionMode === 'simulation' ? 'SIMULATION MODE' : 'REAL CAMERA MODE'}</strong></div>}
           {active && <div className="threat-banner">
             <div className="threat-icon"><active.icon/></div><div><b>{active.reason}</b><span>{active.detail}</span></div>
             <div className="confidence"><span>CONFIDENCE</span><b>{active.confidence}%</b></div><div className="banner-meta"><span>{now()}</span><b>{active.action}</b></div>
@@ -252,7 +244,7 @@ export default function App() {
                     <tr><td><i className="avatar blue">U2</i>Demo User 02</td><td>Placeholder Vault</td><td><span className="risk medium">MED</span></td><td>10:18</td></tr>
                     <tr><td><i className="avatar purple">U3</i>Demo User 03</td><td>Mock Project File</td><td><span className="risk low">LOW</span></td><td>09:56</td></tr>
                   </tbody></table></div>
-                  <div className="dash-card alerts"><CardTitle title="Detection status" tag="NO ACTIVE ALERTS"/><div className="alert-row safe"><ShieldCheck/><div><b>No active threat detected</b><span>Waiting for a user simulation or verified camera signal</span></div><strong>SAFE</strong></div><div className="alert-row minor"><Camera/><div><b>{detectionMode === 'camera' ? cameraMessage : 'Camera not analyzed yet'}</b><span>{detectionMode === 'camera' ? 'Experimental browser assistance' : 'Simulation mode does not access the camera'}</span></div><strong>INFO</strong></div></div>
+                  <div className="dash-card alerts"><CardTitle title="Detection status" tag={active ? active.mode.toUpperCase() : 'NO ACTIVE ALERTS'}/><div className="alert-row safe"><ShieldCheck/><div><b>{active ? active.reason : 'No active threat detected'}</b><span>{active ? active.detail : 'Waiting for a manual simulation or verified backend result'}</span></div><strong>{active ? active.mode.toUpperCase() : 'SAFE'}</strong></div><div className="alert-row minor"><Camera/><div><b>{detectionMode === 'real' ? cameraMessage : 'Camera inactive'}</b><span>{detectionMode === 'real' ? `Backend ${backendState} · OpenCV face analysis` : 'Simulation mode does not access the camera'}</span></div><strong>INFO</strong></div></div>
                 </div>
               </div>
               {active && <div className="lock-overlay"><div className="lock-symbol"><LockKeyhole/></div><span>ZERO-TRUST PROTECTION ACTIVE</span><h3>Sensitive data secured</h3><p>{active.action}. Clear the detected risk before resuming this session.</p><button onClick={reset}><RefreshCw/> Reset secure session</button></div>}
@@ -261,7 +253,7 @@ export default function App() {
         </div>
         <div className="simulation-panel">
           <div className="sim-copy"><span>MANUAL SIMULATOR</span><h3>Test a threat scenario</h3><p>{detectionMode === 'simulation' ? 'These controls create explicit user-triggered demo events. They are never presented as camera detections.' : 'Switch to Simulation Demo above to use manual triggers.'}</p></div>
-          <div className="sim-buttons"><button disabled={detectionMode !== 'simulation'} onClick={() => simulate('phone')}><Smartphone/><span><b>Simulate Phone</b><small>User-triggered Warning</small></span></button><button disabled={detectionMode !== 'simulation'} onClick={() => simulate('observer')}><UserRoundX/><span><b>Simulate Observer</b><small>User-triggered Warning</small></span></button><button disabled={detectionMode !== 'simulation'} onClick={() => simulate('shoulder')}><Eye/><span><b>Simulate Shoulder Surfing</b><small>User-triggered Lockdown</small></span></button><button className="reset" onClick={reset}><RefreshCw/><span><b>Reset Session</b><small>Clear active threats</small></span></button></div>
+          <div className="sim-buttons"><button disabled={detectionMode !== 'simulation'} onClick={() => simulate('phone')}><Smartphone/><span><b>Simulate Phone</b><small>User-triggered Warning</small></span></button><button disabled={detectionMode !== 'simulation'} onClick={() => simulate('observer')}><UserRoundX/><span><b>Simulate Second Face</b><small>User-triggered Warning</small></span></button><button disabled={detectionMode !== 'simulation'} onClick={() => simulate('shoulder')}><LockKeyhole/><span><b>Simulate Lockdown</b><small>User-triggered Lockdown</small></span></button><button className="reset" onClick={reset}><RefreshCw/><span><b>Reset</b><small>Clear active threats</small></span></button></div>
         </div>
         <div className="event-log">
           <div className="log-head"><div><Radio/><span><b>Security event stream</b><small>SESSION LEDGER · LOCAL</small></span></div><span className="connected"><i/> MONITORING</span></div>
@@ -271,11 +263,10 @@ export default function App() {
 
       <section className="section about-section" id="about"><div className="shell about-grid">
         <div className="about-visual"><div className="glass-layers"><div className="layer l1"/><div className="layer l2"/><div className="layer l3"><Shield size={60}/></div></div><div className="stat-card top"><b>&lt;40ms</b><span>target response latency</span></div><div className="stat-card bottom"><b>3</b><span>implemented reasoning engines</span></div></div>
-        <div><div className="kicker">THE ANALOG GAP</div><h2>Security shouldn’t stop at the edge of the screen.</h2><p className="lead">GlassWall AI is a real-time security prototype exploring how computer vision and zero-trust UI protection can reduce physical data leakage in high-security environments.</p><p>Traditional DLP watches files, networks, and endpoints. GlassWall focuses on what happens after sensitive data is rendered: people capturing it with phones, cameras, or unauthorized viewing.</p><div className="honesty"><ShieldCheck/><div><b>Built to demonstrate, designed to integrate</b><span>The live site uses simulated detections for a safe browser demo. Its architecture is prepared for WebRTC, MediaPipe, YOLO, FastAPI, and Azure—not presented as already deployed AI.</span></div></div></div>
+        <div><div className="kicker">THE ANALOG GAP</div><h2>Security shouldn’t stop at the edge of the screen.</h2><p className="lead">GlassWall AI is a working local security prototype using webcam frames, FastAPI WebSockets, OpenCV face detection, and temporal threat evaluation.</p><p>Traditional DLP watches files, networks, and endpoints. GlassWall focuses on what happens after sensitive data is rendered: unauthorized observers and physical capture risks.</p><div className="honesty"><ShieldCheck/><div><b>Live frontend, local inference</b><span>GitHub Pages hosts the frontend and manual simulation. Real face detection runs locally because static hosting cannot execute Python inference. Phone detection remains disabled until a YOLO/COCO model is added.</span></div></div></div>
       </div></section>
 
-      <section className="section shell" id="architecture"><SectionHead kicker="SYSTEM ARCHITECTURE" title="From visual signal to verified response." text="A low-latency pipeline separates perception, reasoning, remediation, and audit—so every layer can evolve independently." />
-        <div className="pipeline">{pipeline.map((item, i) => { const name = item[0] as string; const Icon = item[1] as typeof Shield; return <div className="pipe-wrap" key={name}><div className="pipe-card"><span>{String(i + 1).padStart(2, '0')}</span><Icon/><b>{name}</b></div>{i < pipeline.length - 1 && <ChevronRight className="pipe-arrow"/>}</div> })}</div>
+      <section className="section shell" id="architecture"><SectionHead kicker="SYSTEM ARCHITECTURE" title="Working modules, clearly separated." text="The local system streams compressed webcam frames to FastAPI, runs real OpenCV face analysis, applies temporal policy, and returns an auditable UI state." />
         <div className="module-grid">{modules.map(([num, title, text, status]) => <article className="module-card" key={num}><div className="module-num">{num}</div><div><h3>{title}</h3><p>{text}</p><span className={status.startsWith('Implemented') ? 'tag implemented' : 'tag planned'}>{status}</span></div></article>)}</div>
       </section>
 
@@ -283,9 +274,9 @@ export default function App() {
 
       <section className="section shell" id="technology"><SectionHead kicker="TOOLS & TECHNOLOGIES" title="What’s built—and what comes next." text="Every capability is labeled honestly: implemented in this repository, designed at the architecture layer, or planned for integration." />
         <div className="tech-grid">
-          <Tech title="Frontend + browser AI" icon={Code2} status="IMPLEMENTED" items={['React + TypeScript', 'TensorFlow.js COCO-SSD', 'Optional webcam preview', 'Temporal detection smoothing', 'GitHub Pages workflow']}/>
+          <Tech title="Frontend client" icon={Code2} status="IMPLEMENTED" items={['React + TypeScript', 'Webcam frame capture', 'WebSocket streaming', 'Real-time blur / lockdown', 'GitHub Pages workflow']}/>
           <Tech title="Reasoning core" icon={BrainCircuit} status="IMPLEMENTED" items={['Python threat models', '3D spatial ray-casting', 'Augmented AVL interval tree', 'Threat state graph', 'Thread-safe evaluation']}/>
-          <Tech title="AI & service layer" icon={Terminal} status="PLANNED INTEGRATION" items={['FastAPI + WebSockets', 'OpenCV + MediaPipe', 'YOLO object detection', 'WebRTC capture strategy', 'Command remediation']}/>
+          <Tech title="Local detection service" icon={Terminal} status="IMPLEMENTED" items={['FastAPI + WebSockets', 'OpenCV Haar faces', 'Temporal state engine', 'Per-session reset cooldown', 'Structured detection API']}/>
           <Tech title="Cloud pipeline" icon={Cloud} status="ARCHITECTURE READY" items={['Azure Container Apps', 'Event Grid + Functions', 'Cosmos DB threat ledger', 'Static Web Apps option', 'GitHub Pages live demo']}/>
         </div>
       </section>
