@@ -23,6 +23,7 @@ from .saas_models import (
     IncidentSignal,
     IncidentStatus,
     Organization,
+    ProtectionPolicy,
     ProtectionAction,
     ProtectedZone,
     RemediationAction,
@@ -102,6 +103,7 @@ class SaaSRepository:
         Base.metadata.create_all(self.engine)
         self._ensure_sqlite_incident_columns()
         self._ensure_sqlite_zone_columns()
+        self._ensure_sqlite_policy_columns()
 
     def _ensure_sqlite_incident_columns(self) -> None:
         if self.engine.dialect.name != "sqlite":
@@ -153,6 +155,32 @@ class SaaSRepository:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(text(f"ALTER TABLE protected_zones ADD COLUMN {name} {definition}"))
+
+    def _ensure_sqlite_policy_columns(self) -> None:
+        if self.engine.dialect.name != "sqlite":
+            return
+        inspector = inspect(self.engine)
+        if "protection_policies" not in inspector.get_table_names():
+            return
+        existing = {column["name"] for column in inspector.get_columns("protection_policies")}
+        columns = {
+            "warning_threshold": "INTEGER NOT NULL DEFAULT 60",
+            "lockdown_threshold": "INTEGER NOT NULL DEFAULT 80",
+            "recovery_seconds": "INTEGER NOT NULL DEFAULT 2",
+            "monitoring_required": "BOOLEAN NOT NULL DEFAULT 0",
+            "watermark_mode": "VARCHAR(32) NOT NULL DEFAULT 'ON_THREAT'",
+            "warning_default_action": "VARCHAR(32) NOT NULL DEFAULT 'BLUR'",
+            "lockdown_default_action": "VARCHAR(32) NOT NULL DEFAULT 'HIDE'",
+            "protect_high_zones_on_warning": "BOOLEAN NOT NULL DEFAULT 1",
+            "protect_all_zones_on_lockdown": "BOOLEAN NOT NULL DEFAULT 1",
+            "require_reauthentication_after_lockdown": "BOOLEAN NOT NULL DEFAULT 0",
+            "created_at": "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        }
+        with self.engine.begin() as connection:
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE protection_policies ADD COLUMN {name} {definition}"))
 
     def ping(self) -> None:
         with self.engine.connect() as connection:
@@ -516,6 +544,41 @@ class SaaSRepository:
                 raise TenantAccessError("ProtectedZone is not available in workspace scope")
             session.delete(zone)
 
+    def list_policies(self, organization_id: str, workspace_id: str | None = None) -> list[ProtectionPolicy]:
+        with self.session_scope() as session:
+            if session.get(Organization, organization_id) is None:
+                raise TenantAccessError("Organization is not available")
+            query = select(ProtectionPolicy).where(ProtectionPolicy.organization_id == organization_id)
+            if workspace_id:
+                self._tenant_get(session, Workspace, organization_id, workspace_id)
+                query = query.where(ProtectionPolicy.workspace_id == workspace_id)
+            return list(session.scalars(query.order_by(ProtectionPolicy.created_at.desc())).all())
+
+    def create_policy_from_preset(self, organization_id: str, workspace_id: str, preset: str) -> ProtectionPolicy:
+        config = policy_preset(preset)
+        with self.session_scope() as session:
+            self._tenant_get(session, Workspace, organization_id, workspace_id)
+            policy = ProtectionPolicy(organization_id=organization_id, workspace_id=workspace_id, **config)
+            session.add(policy)
+            session.flush()
+            return policy
+
+    def update_policy(self, organization_id: str, policy_id: str, updates: dict[str, object]) -> ProtectionPolicy:
+        with self.session_scope() as session:
+            policy = self._tenant_get(session, ProtectionPolicy, organization_id, policy_id)
+            for key in [
+                "name", "enabled", "warning_threshold", "lockdown_threshold", "recovery_seconds", "monitoring_required",
+                "watermark_mode", "warning_default_action", "lockdown_default_action", "protect_high_zones_on_warning",
+                "protect_all_zones_on_lockdown", "require_reauthentication_after_lockdown",
+            ]:
+                if key in updates:
+                    setattr(policy, key, updates[key])
+            if policy.warning_threshold >= policy.lockdown_threshold:
+                raise ValueError("warning threshold must be lower than lockdown threshold")
+            policy.updated_at = datetime.now(timezone.utc)
+            session.flush()
+            return policy
+
     def admin_overview(self, organization_id: str, at: datetime | None = None, expiry_seconds: int = 60) -> dict[str, object]:
         with self.session_scope() as session:
             if session.get(Organization, organization_id) is None:
@@ -754,6 +817,20 @@ def _severity_for_score(score: int) -> str:
     if score >= 30:
         return IncidentSeverity.MEDIUM.value
     return IncidentSeverity.LOW.value
+
+
+def policy_preset(name: str) -> dict[str, object]:
+    presets: dict[str, dict[str, object]] = {
+        "Standard Office": dict(name="Standard Office", warning_threshold=60, lockdown_threshold=82, recovery_seconds=2, monitoring_required=False, watermark_mode="ON_THREAT", warning_default_action="BLUR", lockdown_default_action="HIDE", protect_high_zones_on_warning=True, protect_all_zones_on_lockdown=True, require_reauthentication_after_lockdown=False),
+        "Banking Operations": dict(name="Banking Operations", warning_threshold=55, lockdown_threshold=78, recovery_seconds=4, monitoring_required=True, watermark_mode="ALWAYS", warning_default_action="REDACT", lockdown_default_action="HIDE", protect_high_zones_on_warning=True, protect_all_zones_on_lockdown=True, require_reauthentication_after_lockdown=True),
+        "Healthcare Records": dict(name="Healthcare Records", warning_threshold=58, lockdown_threshold=80, recovery_seconds=5, monitoring_required=True, watermark_mode="ALWAYS", warning_default_action="BLUR", lockdown_default_action="REDACT", protect_high_zones_on_warning=True, protect_all_zones_on_lockdown=True, require_reauthentication_after_lockdown=True),
+        "Source-Code Cleanroom": dict(name="Source-Code Cleanroom", warning_threshold=50, lockdown_threshold=75, recovery_seconds=6, monitoring_required=True, watermark_mode="ALWAYS", warning_default_action="REDACT", lockdown_default_action="HIDE", protect_high_zones_on_warning=True, protect_all_zones_on_lockdown=True, require_reauthentication_after_lockdown=True),
+        "Remote Contractor": dict(name="Remote Contractor", warning_threshold=55, lockdown_threshold=78, recovery_seconds=5, monitoring_required=True, watermark_mode="ALWAYS", warning_default_action="BLUR", lockdown_default_action="HIDE", protect_high_zones_on_warning=True, protect_all_zones_on_lockdown=True, require_reauthentication_after_lockdown=True),
+        "Critical Restricted Workspace": dict(name="Critical Restricted Workspace", warning_threshold=45, lockdown_threshold=70, recovery_seconds=8, monitoring_required=True, watermark_mode="ALWAYS", warning_default_action="HIDE", lockdown_default_action="HIDE", protect_high_zones_on_warning=True, protect_all_zones_on_lockdown=True, require_reauthentication_after_lockdown=True),
+    }
+    if name not in presets:
+        raise ValueError("unknown policy preset")
+    return presets[name]
 
 
 def audit_repository_action(

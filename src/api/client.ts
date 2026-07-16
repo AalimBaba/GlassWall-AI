@@ -1,4 +1,4 @@
-import type { AdminOverview, DeviceInventory, EndpointHeartbeatPayload, EndpointHeartbeatResponse, IncidentDetail, IncidentList, IncidentStatus, ProtectedZone, ProtectedZoneInput, ProtectedZoneList } from './types'
+import type { AdminOverview, DeviceInventory, EndpointHeartbeatPayload, EndpointHeartbeatResponse, IncidentDetail, IncidentList, IncidentStatus, ProtectedZone, ProtectedZoneInput, ProtectedZoneList, ProtectionPolicy, ProtectionPolicyList } from './types'
 
 export class ApiError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -113,6 +113,21 @@ export function createApiClient({ baseUrl, timeoutMs }: ApiClientOptions) {
         baseUrl,
         `/api/organizations/${organizationId}/workspaces/${workspaceId}/zones/${zoneId}`,
         { method: 'DELETE', signal },
+        timeoutMs,
+      )
+    },
+    getPolicies(organizationId: string, workspaceId?: string, signal?: AbortSignal) {
+      const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''
+      return request<ProtectionPolicyList>(baseUrl, `/api/organizations/${organizationId}/policies${query}`, { signal }, timeoutMs)
+    },
+    createPolicyPreset(organizationId: string, workspaceId: string, preset: string, signal?: AbortSignal) {
+      return request<ProtectionPolicy>(baseUrl, `/api/organizations/${organizationId}/workspaces/${workspaceId}/policies/presets/${encodeURIComponent(preset)}`, { method: 'POST', signal }, timeoutMs)
+    },
+    updatePolicy(organizationId: string, policyId: string, payload: Partial<ProtectionPolicy>, signal?: AbortSignal) {
+      return request<ProtectionPolicy>(
+        baseUrl,
+        `/api/organizations/${organizationId}/policies/${policyId}`,
+        { method: 'PATCH', body: JSON.stringify(payload), signal },
         timeoutMs,
       )
     },

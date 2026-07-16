@@ -216,3 +216,44 @@ class ProtectedZoneListResponse(BaseModel):
     workspace_id: str
     zones: list[ProtectedZoneResponse]
     sample_data: bool = False
+
+
+class ProtectionPolicyResponse(BaseModel):
+    id: str
+    organization_id: str
+    workspace_id: str | None = None
+    name: str
+    enabled: bool
+    warning_threshold: int
+    lockdown_threshold: int
+    recovery_seconds: int
+    monitoring_required: bool
+    watermark_mode: str
+    warning_default_action: str
+    lockdown_default_action: str
+    protect_high_zones_on_warning: bool
+    protect_all_zones_on_lockdown: bool
+    require_reauthentication_after_lockdown: bool
+    created_at: str
+    updated_at: str
+
+
+class ProtectionPolicyListResponse(BaseModel):
+    organization_id: str
+    policies: list[ProtectionPolicyResponse]
+    sample_data: bool = False
+
+
+class ProtectionPolicyPatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=180)
+    enabled: bool | None = None
+    warning_threshold: int | None = Field(default=None, ge=0, le=100)
+    lockdown_threshold: int | None = Field(default=None, ge=0, le=100)
+    recovery_seconds: int | None = Field(default=None, ge=0, le=300)
+    monitoring_required: bool | None = None
+    watermark_mode: Literal["OFF", "ALWAYS", "ON_THREAT"] | None = None
+    warning_default_action: Literal["BLUR", "REDACT", "HIDE", "WATERMARK"] | None = None
+    lockdown_default_action: Literal["BLUR", "REDACT", "HIDE", "WATERMARK"] | None = None
+    protect_high_zones_on_warning: bool | None = None
+    protect_all_zones_on_lockdown: bool | None = None
+    require_reauthentication_after_lockdown: bool | None = None

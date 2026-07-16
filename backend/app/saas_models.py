@@ -141,6 +141,18 @@ class ProtectionPolicy(TenantMixin, Base):
     risk_weights_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     actions_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    warning_threshold: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    lockdown_threshold: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
+    recovery_seconds: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    monitoring_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    watermark_mode: Mapped[str] = mapped_column(String(32), default="ON_THREAT", nullable=False)
+    warning_default_action: Mapped[str] = mapped_column(String(32), default=ProtectionAction.BLUR.value, nullable=False)
+    lockdown_default_action: Mapped[str] = mapped_column(String(32), default=ProtectionAction.HIDE.value, nullable=False)
+    protect_high_zones_on_warning: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    protect_all_zones_on_lockdown: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    require_reauthentication_after_lockdown: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class ProtectedZone(TenantMixin, Base):

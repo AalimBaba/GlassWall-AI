@@ -201,3 +201,32 @@ def test_protected_zone_api_tenant_isolation() -> None:
     assert response.status_code == 404
     response = client.patch(f"/api/organizations/{org_b.id}/workspaces/{workspace_a.id}/zones/{zone.id}", json={"name": "bad"})
     assert response.status_code == 404
+
+
+def test_policy_api_creates_lists_and_updates_presets() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    repo = SaaSRepository(engine=engine)
+    repo.create_schema()
+    main.saas_repo = repo
+    org = repo.create_organization("Policy Tenant", "policy-tenant")
+    workspace = repo.create_workspace(org.id, "Cleanroom")
+
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    created = client.post(f"/api/organizations/{org.id}/workspaces/{workspace.id}/policies/presets/Source-Code Cleanroom")
+    assert created.status_code == 200
+    policy_id = created.json()["id"]
+    assert created.json()["monitoring_required"] is True
+
+    listed = client.get(f"/api/organizations/{org.id}/policies", params={"workspace_id": workspace.id})
+    assert listed.status_code == 200
+    assert listed.json()["policies"][0]["name"] == "Source-Code Cleanroom"
+    assert listed.json()["sample_data"] is False
+
+    patched = client.patch(f"/api/organizations/{org.id}/policies/{policy_id}", json={"warning_threshold": 48, "lockdown_threshold": 74})
+    assert patched.status_code == 200
+    assert patched.json()["warning_threshold"] == 48
+
+    invalid = client.patch(f"/api/organizations/{org.id}/policies/{policy_id}", json={"warning_threshold": 90, "lockdown_threshold": 70})
+    assert invalid.status_code == 400

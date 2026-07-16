@@ -162,3 +162,29 @@ export type ProtectedZoneList = {
   zones: ProtectedZone[]
   sample_data: boolean
 }
+
+export type ProtectionPolicy = {
+  id: string
+  organization_id: string
+  workspace_id: string | null
+  name: string
+  enabled: boolean
+  warning_threshold: number
+  lockdown_threshold: number
+  recovery_seconds: number
+  monitoring_required: boolean
+  watermark_mode: 'OFF' | 'ALWAYS' | 'ON_THREAT' | string
+  warning_default_action: ZoneProtectionAction
+  lockdown_default_action: ZoneProtectionAction
+  protect_high_zones_on_warning: boolean
+  protect_all_zones_on_lockdown: boolean
+  require_reauthentication_after_lockdown: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ProtectionPolicyList = {
+  organization_id: string
+  policies: ProtectionPolicy[]
+  sample_data: boolean
+}

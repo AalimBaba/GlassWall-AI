@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from backend.app.saas_models import EndpointHealth
-from backend.app.saas_repository import HeartbeatInput, SaaSRepository, TenantAccessError
+from backend.app.saas_repository import HeartbeatInput, SaaSRepository, TenantAccessError, policy_preset
 
 
 @pytest.fixture()
@@ -273,3 +273,26 @@ def test_protected_zone_tenant_and_workspace_isolation(repo: SaaSRepository) -> 
         repo.update_protected_zone(org_b, workspace_a, zone.id, {"name": "leak"})
     with pytest.raises(TenantAccessError):
         repo.delete_protected_zone(org_a, workspace_b, zone.id)
+
+
+def test_policy_presets_creation_update_and_isolation(repo: SaaSRepository) -> None:
+    org, workspace, *_ = make_endpoint(repo, "policy-a")
+    other_org, *_ = make_endpoint(repo, "policy-b")
+    preset = policy_preset("Banking Operations")
+    assert preset["monitoring_required"] is True
+    policy = repo.create_policy_from_preset(org, workspace, "Banking Operations")
+    assert policy.name == "Banking Operations"
+    assert policy.workspace_id == workspace
+    assert repo.list_policies(org, workspace)[0].id == policy.id
+
+    updated = repo.update_policy(org, policy.id, {"warning_threshold": 50, "lockdown_threshold": 70, "enabled": False})
+    assert updated.warning_threshold == 50
+    assert updated.lockdown_threshold == 70
+    assert updated.enabled is False
+
+    with pytest.raises(ValueError):
+        repo.update_policy(org, policy.id, {"warning_threshold": 80, "lockdown_threshold": 70})
+    with pytest.raises(TenantAccessError):
+        repo.update_policy(other_org, policy.id, {"enabled": True})
+    with pytest.raises(ValueError):
+        repo.create_policy_from_preset(org, workspace, "Imaginary Policy")

@@ -14,11 +14,13 @@ import { useDevices } from './hooks/useDevices'
 import { useEndpointHeartbeat } from './hooks/useEndpointHeartbeat'
 import { useIncidents } from './hooks/useIncidents'
 import { useProtectedZones } from './hooks/useProtectedZones'
+import { useProtectionPolicies } from './hooks/useProtectionPolicies'
 import { ProtectedZoneOverlay } from './components/ProtectedZoneOverlay'
 import { ProtectedZoneEditor } from './components/ProtectedZoneEditor'
 import { ForensicWatermark } from './components/ForensicWatermark'
 import { hasProtectedFallback, zoneProtectionDecision, type ThreatState } from './features/zones/zoneMath'
 import type { ProtectedZone } from './api/types'
+import { evaluateProtectionPolicy } from './features/policies/policyDecision'
 import { LatestFrameQueue } from './pipeline/LatestFrameQueue'
 import { PhoneInferenceWorker } from './pipeline/PhoneInferenceWorker'
 import { PipelineMetrics } from './pipeline/PipelineMetrics'
@@ -152,6 +154,7 @@ export default function App() {
   const deviceInventory = useDevices(runtimeConfig)
   const incidents = useIncidents(runtimeConfig)
   const protectedZones = useProtectedZones(runtimeConfig)
+  const protectionPolicies = useProtectionPolicies(runtimeConfig)
   const currentSessionState = active?.mode === 'Lockdown' ? 'LOCKDOWN' : active?.mode === 'Warning' ? 'WARNING' : cameraState === 'error' ? 'MONITORING_INTERRUPTED' : 'SECURE'
   const latestRiskScore = active?.mode === 'Lockdown' ? Math.max(80, active.confidence) : active?.mode === 'Warning' ? Math.max(60, active.confidence) : Math.min(29, Math.round(Math.max(0, phoneSnapshot.confidence) * 100))
   const heartbeatStatus = useEndpointHeartbeat(runtimeConfig, {
@@ -462,6 +465,7 @@ export default function App() {
   const highestPhoneConfidence = Math.max(0, ...phoneDetections.map(item => item.score))
   const threatState: ThreatState = active?.mode === 'Lockdown' ? 'LOCKDOWN' : active?.mode === 'Warning' ? 'WARNING' : 'SECURE'
   const zoneDecisions = zoneProtectionDecision(protectedZones.zones, threatState)
+  const policyDecision = evaluateProtectionPolicy({ state: threatState, riskScore: latestRiskScore, zones: protectedZones.zones, policy: protectionPolicies.activePolicy, monitoringHealthy: operationalState === 'PROTECTION ACTIVE' || operationalState === 'DEGRADED PROTECTION' })
   const activeZoneProtection = zoneDecisions.some(item => item.active)
   const fullDashboardFallback = hasProtectedFallback(protectedZones.zones, threatState)
 
@@ -508,7 +512,8 @@ export default function App() {
       {appView === 'overview' && <AdminOverviewSurface overview={adminOverview.data} devices={deviceInventory.devices} loading={adminOverview.loading || deviceInventory.loading} error={adminOverview.error || deviceInventory.error} lastUpdatedAt={adminOverview.lastUpdatedAt || deviceInventory.lastUpdatedAt} configReady={runtimeConfig.controlPlaneConfigured} onRefresh={() => { void adminOverview.refresh(); void deviceInventory.refresh() }} onOpenEndpoint={() => setAppView('endpoint')} onOpenDevices={() => setAppView('devices')} />}
       {appView === 'devices' && <DevicesSurface devices={deviceInventory.devices} loading={deviceInventory.loading} error={deviceInventory.error} lastUpdatedAt={deviceInventory.lastUpdatedAt} configReady={runtimeConfig.controlPlaneConfigured} organizationId={runtimeConfig.organizationId} selectedDevice={selectedDevice} onSelectDevice={setSelectedDevice} onRefresh={() => void deviceInventory.refresh()} onOpenEndpoint={() => setAppView('endpoint')} />}
       {appView === 'incidents' && <IncidentsSurface incidents={incidents} configReady={runtimeConfig.controlPlaneConfigured} organizationId={runtimeConfig.organizationId} onOpenEndpoint={() => setAppView('endpoint')} />}
-      {['policies', 'analytics', 'settings'].includes(appView) && <PlaceholderSurface view={appView} onOpenEndpoint={() => setAppView('endpoint')} />}
+      {appView === 'policies' && <PoliciesSurface policies={protectionPolicies} configReady={runtimeConfig.controlPlaneConfigured} workspaceId={runtimeConfig.workspaceId} onOpenEndpoint={() => setAppView('endpoint')} />}
+      {['analytics', 'settings'].includes(appView) && <PlaceholderSurface view={appView} onOpenEndpoint={() => setAppView('endpoint')} />}
 
       {appView === 'endpoint' && <section className="section shell" id="demo">
         <SectionHead kicker="INTERACTIVE PROTOTYPE" title="Put the dashboard under pressure." text="Choose an explicit simulation or opt in to experimental, browser-side object detection. Nothing triggers automatically at startup." />
@@ -530,6 +535,7 @@ export default function App() {
             <div className="camera-rules"><span><Check/> Phone ≥{Math.round(PHONE_POLICY.confidenceThreshold * 100)}% + {PHONE_POLICY.consecutiveFrames} frames</span><span><Check/> 1.5s Warning · 3.0s Lockdown</span><span><Check/> 2.0s clear → Recovery → Secure</span></div>
             {(detections.length > 0 || phoneDetections.length > 0) && <div className="active-detections">{phoneDetections.map((item, index) => <span key={`phone-${index}`}>PHONE · {Math.round(item.score * 100)}% · [{item.bbox.map(Math.round).join(', ')}]</span>)}{detections.map((item, index) => <span key={`${item.type}-${index}`}>{item.type} · {Math.round(item.confidence * 100)}% · [{item.bbox.join(', ')}]</span>)}</div>}
             <div className="camera-actions">{cameraState !== 'scanning' ? <button onClick={startCamera} disabled={phoneModelState !== 'ready'}><Camera/> Start real camera</button> : <button onClick={stopCamera}><X/> Stop camera</button>}{phoneModelState === 'error' && <button onClick={loadPhoneModel}><RefreshCw/> Retry phone model</button>}{backendState !== 'connected' && <button onClick={connectBackend}><RefreshCw/> Retry face backend</button>}<button onClick={() => setZoneEditorOpen(value => !value)}><Blocks/> {zoneEditorOpen ? 'Close zone editor' : 'Edit protected zones'}</button></div>
+            <div className="policy-decision"><b>Policy decision</b><span>{protectionPolicies.activePolicy ? policyDecision.reason : 'No active workspace policy. Built-in zone fallback remains active.'}</span><small>Watermark {policyDecision.watermark_level} · Reauth {policyDecision.require_reauthentication ? 'required' : 'not required'}</small></div>
           </div>
         </div>
         {zoneEditorOpen && <div className="zone-editor-panel"><div className="panel-title"><div><b>Protected workspace zones</b><span>{runtimeConfig.controlPlaneConfigured ? `Workspace ${runtimeConfig.workspaceId}` : 'Control-plane backend required to persist zones'}</span></div><button onClick={() => void protectedZones.refresh()}>Refresh</button></div>{!runtimeConfig.controlPlaneConfigured && <ControlPlaneEmpty onOpenEndpoint={() => setAppView('endpoint')} onRefresh={() => void protectedZones.refresh()}/>} {runtimeConfig.controlPlaneConfigured && protectedZones.error && <div className="admin-error"><TriangleAlert/><div><b>Unable to load protected zones</b><span>{protectedZones.error}</span></div><button onClick={() => void protectedZones.refresh()}>Retry</button></div>} {runtimeConfig.controlPlaneConfigured && <ProtectedZoneEditor zones={protectedZones.zones} selectedZone={selectedZone} onSelect={setSelectedZone} onCreate={zone => void protectedZones.createZone(zone)} onUpdate={(id, updates) => void protectedZones.updateZone(id, updates)} onDelete={id => { void protectedZones.deleteZone(id); setSelectedZone(null) }} onCancel={() => { setSelectedZone(null); setZoneEditorOpen(false) }}/>}</div>}
@@ -668,6 +674,18 @@ function ControlPlaneEmpty({ onOpenEndpoint, onRefresh }: { onOpenEndpoint: () =
 
 function EmptyEndpoints({ onOpenEndpoint, onRefresh }: { onOpenEndpoint: () => void; onRefresh: () => void }) {
   return <div className="admin-empty"><Users/><div><b>No endpoints registered</b><span>Start the Endpoint Protection client with the control-plane backend configured. Registered devices and live security posture will appear here.</span></div><div><button onClick={onOpenEndpoint}>Open Endpoint Protection</button><button onClick={() => document.getElementById('technology')?.scrollIntoView({ behavior: 'smooth' })}>View Local Setup</button><button onClick={onRefresh}>Refresh</button></div></div>
+}
+
+function PoliciesSurface({ policies, configReady, workspaceId, onOpenEndpoint }: { policies: ReturnType<typeof useProtectionPolicies>; configReady: boolean; workspaceId: string; onOpenEndpoint: () => void }) {
+  const presets = ['Standard Office', 'Banking Operations', 'Healthcare Records', 'Source-Code Cleanroom', 'Remote Contractor', 'Critical Restricted Workspace']
+  return <section className="section shell admin-surface">
+    <div className="admin-head"><div><div className="kicker">POLICY BUILDER</div><h2>Policy-driven remediation</h2><p>Policies determine how GlassWall AI responds when risk increases. No saved policies are fabricated; create one from an explicit preset to persist it for workspace <code>{workspaceId || 'Not configured'}</code>.</p></div><div className="admin-actions"><button onClick={() => void policies.refresh()}><RefreshCw/> Refresh</button></div></div>
+    {!configReady && <ControlPlaneEmpty onOpenEndpoint={onOpenEndpoint} onRefresh={() => void policies.refresh()}/>}
+    {configReady && policies.error && <div className="admin-error"><TriangleAlert/><div><b>Unable to load policies</b><span>{policies.error}</span></div><button onClick={() => void policies.refresh()}>Retry</button></div>}
+    {configReady && <div className="policy-presets">{presets.map(preset => <button key={preset} onClick={() => void policies.createPreset(preset)}>{preset}<span>Create preset</span></button>)}</div>}
+    {configReady && !policies.loading && policies.policies.length === 0 && <div className="admin-empty"><KeyRound/><div><b>No policies configured</b><span>Create a policy from a preset to control warning thresholds, lockdown behavior, watermarking and reauthentication.</span></div><div><button onClick={onOpenEndpoint}>Open Endpoint Protection</button></div></div>}
+    {configReady && policies.policies.length > 0 && <div className="policy-list">{policies.policies.map(policy => <div className="policy-card" key={policy.id}><div><b>{policy.name}</b><span>{policy.enabled ? 'Enabled' : 'Disabled'} · Warning {policy.warning_threshold} · Lockdown {policy.lockdown_threshold}</span><small>Watermark {policy.watermark_mode} · Recovery {policy.recovery_seconds}s · Monitoring {policy.monitoring_required ? 'required' : 'optional'}</small></div><div className="policy-edit-grid"><label>Warning<input type="number" min="0" max="100" value={policy.warning_threshold} onChange={event => void policies.updatePolicy(policy.id, { warning_threshold: Number(event.target.value) })}/></label><label>Lockdown<input type="number" min="0" max="100" value={policy.lockdown_threshold} onChange={event => void policies.updatePolicy(policy.id, { lockdown_threshold: Number(event.target.value) })}/></label><label>Recovery<input type="number" min="0" max="300" value={policy.recovery_seconds} onChange={event => void policies.updatePolicy(policy.id, { recovery_seconds: Number(event.target.value) })}/></label><label>Enabled<input type="checkbox" checked={policy.enabled} onChange={event => void policies.updatePolicy(policy.id, { enabled: event.target.checked })}/></label></div></div>)}</div>}
+  </section>
 }
 
 function IncidentsSurface({ incidents, configReady, organizationId, onOpenEndpoint }: { incidents: ReturnType<typeof useIncidents>; configReady: boolean; organizationId: string; onOpenEndpoint: () => void }) {

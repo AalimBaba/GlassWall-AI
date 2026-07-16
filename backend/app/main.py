@@ -30,6 +30,9 @@ from .schemas import (
     ProtectedZonePatchRequest,
     ProtectedZoneRequest,
     ProtectedZoneResponse,
+    ProtectionPolicyListResponse,
+    ProtectionPolicyPatchRequest,
+    ProtectionPolicyResponse,
     RemediationActionResponse,
     ThreatIncidentDetailResponse,
     ThreatIncidentSummaryResponse,
@@ -219,6 +222,28 @@ def _zone_response(zone) -> ProtectedZoneResponse:
         enabled=zone.enabled,
         created_at=zone.created_at.isoformat(),
         updated_at=zone.updated_at.isoformat(),
+    )
+
+
+def _policy_response(policy) -> ProtectionPolicyResponse:
+    return ProtectionPolicyResponse(
+        id=policy.id,
+        organization_id=policy.organization_id,
+        workspace_id=policy.workspace_id,
+        name=policy.name,
+        enabled=policy.enabled,
+        warning_threshold=policy.warning_threshold,
+        lockdown_threshold=policy.lockdown_threshold,
+        recovery_seconds=policy.recovery_seconds,
+        monitoring_required=policy.monitoring_required,
+        watermark_mode=policy.watermark_mode,
+        warning_default_action=policy.warning_default_action,
+        lockdown_default_action=policy.lockdown_default_action,
+        protect_high_zones_on_warning=policy.protect_high_zones_on_warning,
+        protect_all_zones_on_lockdown=policy.protect_all_zones_on_lockdown,
+        require_reauthentication_after_lockdown=policy.require_reauthentication_after_lockdown,
+        created_at=policy.created_at.isoformat(),
+        updated_at=policy.updated_at.isoformat(),
     )
 
 
@@ -455,6 +480,45 @@ def delete_protected_zone(organization_id: str, workspace_id: str, zone_id: str)
 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"deleted": True, "zone_id": zone_id}
+
+
+@app.get("/api/organizations/{organization_id}/policies", response_model=ProtectionPolicyListResponse)
+def list_policies(organization_id: str, workspace_id: str | None = None) -> ProtectionPolicyListResponse:
+    try:
+        policies = saas_repo.list_policies(organization_id, workspace_id)
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ProtectionPolicyListResponse(organization_id=organization_id, policies=[_policy_response(item) for item in policies], sample_data=False)
+
+
+@app.post("/api/organizations/{organization_id}/workspaces/{workspace_id}/policies/presets/{preset_name}", response_model=ProtectionPolicyResponse)
+def create_policy_from_preset(organization_id: str, workspace_id: str, preset_name: str) -> ProtectionPolicyResponse:
+    try:
+        return _policy_response(saas_repo.create_policy_from_preset(organization_id, workspace_id, preset_name))
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/organizations/{organization_id}/policies/{policy_id}", response_model=ProtectionPolicyResponse)
+def update_policy(organization_id: str, policy_id: str, payload: ProtectionPolicyPatchRequest) -> ProtectionPolicyResponse:
+    try:
+        return _policy_response(saas_repo.update_policy(organization_id, policy_id, payload.model_dump(exclude_unset=True)))
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.websocket("/ws/analyze")

@@ -226,6 +226,29 @@ When an incident opens or escalates, the backend stores only metadata:
 
 The fingerprint is a SHA-256 hash derived from organization, workspace, device, session, incident ID, and a coarse timestamp bucket. No secrets or raw frame data are included. The investigation drawer displays a shortened fingerprint when timeline events contain watermark metadata.
 
+## Policy-driven remediation
+
+The Policies surface is now connected to tenant-scoped backend policy records. Policies are created only through explicit user action from real presets:
+
+- Standard Office
+- Banking Operations
+- Healthcare Records
+- Source-Code Cleanroom
+- Remote Contractor
+- Critical Restricted Workspace
+
+Each preset persists concrete configuration values for warning threshold, lockdown threshold, recovery duration, monitoring requirements, watermark mode, zone behavior, and post-lockdown reauthentication.
+
+The frontend includes a deterministic policy decision engine. It evaluates:
+
+- current threat state;
+- current risk score;
+- active protected zones;
+- endpoint monitoring health;
+- active workspace policy.
+
+It returns a `ProtectionDecision` containing zone actions, full-workspace fallback, watermark level, reauthentication requirement, incident-event intent, and a human-readable reason. Endpoint Protection displays the current policy decision instead of burying remediation behavior inside raw model callbacks.
+
 Each zone belongs to one organization and workspace, and tenant checks are enforced for list/create/update/delete operations. A zone includes a name, description, sensitivity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), protection action (`BLUR`, `REDACT`, `HIDE`, `WATERMARK`), and enabled flag.
 
 Zone APIs:
