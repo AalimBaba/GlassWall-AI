@@ -80,6 +80,69 @@ Combined strongest state
   → runtime detections + metadata audit log
 ```
 
+```mermaid
+flowchart LR
+  Browser["Endpoint Protection Client<br/>React + webcam + COCO-SSD"] -->|optional WSS frames| FastAPI["FastAPI Backend<br/>OpenCV faces + SaaS APIs"]
+  Browser -->|heartbeat metadata| Heartbeat["Endpoint Heartbeat API"]
+  FastAPI --> Risk["Adaptive Risk Scoring"]
+  Heartbeat --> Repo["Tenant-Scoped Repository<br/>SQLite local dev"]
+  Risk --> Incidents["Threat Incidents + Timeline"]
+  Repo --> Admin["Security Admin Console Data"]
+```
+
+```mermaid
+flowchart TD
+  Signal["Detection signal<br/>phone / observer / interruption"] --> Score["Risk scorer<br/>weighted + deterministic"]
+  Score --> Guard["Temporal guard<br/>no single-frame lockdown"]
+  Guard --> State{"Risk level"}
+  State -->|0-29| Secure["SECURE"]
+  State -->|30-59| Observe["OBSERVE"]
+  State -->|60-79| Warning["WARNING<br/>blur protected zones"]
+  State -->|80-100| Lockdown["LOCKDOWN<br/>obscure sensitive workspace"]
+  Warning --> Ledger["Incident event metadata"]
+  Lockdown --> Ledger
+```
+
+## SaaS control-plane slice
+
+The backend now includes the first multi-tenant SaaS foundation:
+
+- tenant-aware domain records for organizations, workspaces, users, roles, devices, endpoint sessions, policies, protected zones, detection signals, incidents, incident events, remediation actions, audit records, plans, usage records, and integrations;
+- a SQLite/SQLAlchemy repository boundary that can be replaced later by PostgreSQL or Cosmos-backed repositories without moving business rules into route handlers;
+- explicit tenant-scope checks for workspaces, devices, endpoint sessions, incidents, and incident events;
+- endpoint heartbeat storage with health states: Online, Degraded, Monitoring Interrupted, and Offline;
+- heartbeat expiry so endpoints do not stay online forever;
+- admin overview data derived from stored endpoint and incident records, with `sample_data: false` unless explicitly seeded in a future demo workspace;
+- deterministic adaptive risk scoring with explainable factor contributions, configurable weights, decay, hysteresis, and a guard against single-frame Lockdown.
+
+```mermaid
+flowchart TB
+  Org["Organization"] --> Workspace["Workspace"]
+  Org --> User["User + Role"]
+  Org --> Device["Device"]
+  Workspace --> Session["EndpointSession"]
+  Device --> Session
+  Session --> Signal["DetectionSignal"]
+  Session --> Incident["ThreatIncident"]
+  Incident --> Event["IncidentEvent"]
+  Incident --> Action["RemediationAction"]
+  Org --> Audit["AuditRecord"]
+  Org --> Usage["UsageRecord"]
+  Org --> Integration["Integration"]
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> OPEN
+  OPEN --> INVESTIGATING
+  INVESTIGATING --> RESOLVED
+  INVESTIGATING --> FALSE_POSITIVE
+  OPEN --> DISMISSED
+  RESOLVED --> [*]
+  FALSE_POSITIVE --> [*]
+  DISMISSED --> [*]
+```
+
 Relevant files:
 
 ```text
@@ -90,6 +153,9 @@ backend/app/main.py                FastAPI health and WebSocket API
 backend/app/detector.py            Real OpenCV image decoding and face detection
 backend/app/threat_engine.py       Face/phone backend temporal policy
 backend/app/schemas.py             Typed response contract
+backend/app/risk_engine.py         Deterministic adaptive risk scoring
+backend/app/saas_models.py         Tenant-aware SaaS domain model
+backend/app/saas_repository.py     SQLite/SQLAlchemy tenant repository
 backend/tests/                     API and backend state tests
 .github/workflows/deploy.yml       GitHub Pages deployment
 ```
@@ -123,6 +189,13 @@ npm run dev
 In development, the frontend defaults to `ws://127.0.0.1:8000/ws/analyze`. In production, no insecure localhost WebSocket is bundled. Set `VITE_BACKEND_WS_URL=wss://<hosted-backend>/ws/analyze` when a hosted backend exists. Without that variable, the Pages app reports the face backend as unavailable while browser-side phone protection continues working.
 
 Health endpoint: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health).
+
+Initial SaaS APIs:
+
+- `POST /api/organizations/{organization_id}/heartbeats`
+- `GET /api/organizations/{organization_id}/admin/overview`
+
+These APIs require pre-existing organization/workspace/device/session records in the repository. Development seeding will be added as an explicit command in a later slice; the backend does not silently create fake tenants or fake endpoint activity.
 
 ## Modes
 
@@ -161,6 +234,10 @@ Automated coverage includes:
 - malformed frames are rejected;
 - one face stays Secure;
 - second-face Warning and Lockdown transitions work through the WebSocket contract.
+- tenant isolation prevents cross-organization workspace, incident, and timeline access;
+- endpoint heartbeat health expires to Offline;
+- admin overview counts come from stored endpoint and incident records;
+- risk scoring is deterministic, explainable, decays over time, uses hysteresis, and blocks single-frame Lockdown.
 
 ## Mandatory real-camera test matrix
 

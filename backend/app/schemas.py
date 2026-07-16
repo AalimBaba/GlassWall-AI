@@ -28,3 +28,38 @@ class AnalysisResponse(BaseModel):
     timestamp: int
     phone_model_loaded: bool = False
     backend: Literal["opencv-haar"] = "opencv-haar"
+
+
+class EndpointHeartbeatRequest(BaseModel):
+    session_id: str
+    workspace_id: str
+    device_id: str
+    user_id: str | None = None
+    session_state: str = "SECURE"
+    camera_permission: bool
+    backend_connected: bool
+    model_loaded: bool
+    inference_latency_ms: int = Field(ge=0)
+    latest_risk_score: int = Field(ge=0, le=100)
+    last_detection_timestamp: int | None = None
+    application_version: str = "unknown"
+
+
+class EndpointHealthResponse(BaseModel):
+    session_id: str
+    workspace_id: str
+    device_id: str
+    state: str
+    health: str
+    latest_risk_score: int
+    last_heartbeat_at: str | None
+    application_version: str
+
+
+class AdminOverviewResponse(BaseModel):
+    organization_id: str
+    endpoint_count: int
+    health_counts: dict[str, int]
+    incident_count: int
+    open_incident_count: int
+    sample_data: bool = False
