@@ -2,115 +2,117 @@
 
 **Real-Time Optical Data Loss Prevention**
 
-[Live frontend](https://aalimbaba.github.io/GlassWall-AI/) · [Repository](https://github.com/AalimBaba/GlassWall-AI)
+[Live app](https://aalimbaba.github.io/GlassWall-AI/) · [Repository](https://github.com/AalimBaba/GlassWall-AI)
 
-GlassWall AI protects a sensitive dashboard from physical viewing risks. The local full system captures webcam frames in React, sends compressed JPEGs over a WebSocket, detects real faces with OpenCV, applies persistence thresholds in a FastAPI session, and returns `SECURE`, `WARNING`, or `LOCKDOWN`. The UI only blurs or locks from a real backend result or an explicit manual simulation.
+GlassWall AI protects sensitive dashboard content when an actual webcam frame contains a persistent smartphone or when a second face remains visible. It combines browser-side TensorFlow.js COCO-SSD phone detection with an optional local FastAPI/OpenCV face-counting backend. Warning, Lockdown, Recovery, and audit events are driven by real model output or clearly labeled manual simulation—never random values or hardcoded camera events.
 
-> **GitHub Pages hosts the frontend demo. The real-time detection pipeline runs locally using the FastAPI backend because GitHub Pages cannot host Python inference services.**
+## Deployment reality
 
-## What works
+- **GitHub Pages:** runs the full React UI, webcam preview, real browser-side phone inference, phone bounding boxes, temporal phone validation, DLP blur/lockdown, recovery, audit log, and manual simulation.
+- **Local full system:** adds FastAPI WebSocket frame processing and OpenCV second-face detection.
+- GitHub Pages cannot host Python. On the live site, phone protection works independently while face protection is labeled offline/degraded unless a compatible secure backend is configured.
 
-- React + TypeScript + Vite security interface
-- Real webcam preview using `getUserMedia`
-- JPEG frame capture every 400 ms through a hidden canvas
-- FastAPI WebSocket endpoint at `/ws/analyze`
-- Real OpenCV Haar frontal-face detection with bounding boxes and detector scores
-- One face = normal; a second face must persist 1.5 seconds for Warning and 3 seconds for Lockdown
-- Two clear seconds before a threat returns to Secure, preventing state flicker
-- Three-second cooldown after Reset
-- Partial blur in Warning and full protection overlay in Lockdown
-- Active detection list, threat timeline, security event log, backend status, and model status
-- Explicit Simulation Mode with manual-only controls
-- Static GitHub Pages deployment that truthfully reports an offline local backend
+## Real detection models
 
-There are no random confidence values, fake startup alerts, automatic simulation timers, or hardcoded real-detection events.
+### Phone detection
 
-## Detection honesty
+- Model: TensorFlow.js COCO-SSD 2.2.3 with the MobileNet-v2 base.
+- Inference: browser-side on actual `HTMLVideoElement` frames.
+- Accepted classes: `cell phone`, `smartphone`, `mobile phone`, or `phone` (COCO emits `cell phone`).
+- Threshold: 0.45, configurable in `src/phoneThreatTracker.ts`.
+- Output: real model confidence and bounding box rendered over the mirrored camera preview.
+- Model states: MODEL LOADING, MODEL READY, and MODEL ERROR. Camera start is disabled until the model is ready.
 
-### Implemented
+### Face detection
 
-- **Face / second-observer detection:** OpenCV's bundled `haarcascade_frontalface_default.xml`, executed by the local Python backend.
-- **Temporal policy:** state is based on continuous evidence, not a single frame.
-- **Real confidence display:** the UI receives a bounded score derived from OpenCV's actual cascade level weight. This is a detector score, not identity recognition or a calibrated probability.
+- Model: OpenCV's bundled `haarcascade_frontalface_default.xml`.
+- Inference: local Python backend on JPEG frames received over `/ws/analyze`.
+- Purpose: count face regions only. There is no identity recognition or biometric enrollment.
+- Score: a bounded value derived from the cascade's real level weight; it is not a calibrated identity probability.
 
-### Not currently implemented
+## Threat policy
 
-- **Phone/camera object detection:** no YOLO/COCO model file ships with the backend. The API returns `phone_model_loaded: false`, and the frontend displays **Phone model: not loaded**.
-- **Face recognition or identity:** the system counts face regions; it does not identify people.
-- **Gaze / side-face inference:** not claimed by the working detector.
+The phone tracker requires three consecutive qualifying frames before starting its duration clock.
 
-Phone detection requires adding a YOLO/COCO model file. Until then, the backend will never fabricate a `PHONE` or `CAMERA` detection.
+| Evidence | Duration | State / response |
+| --- | ---: | --- |
+| No confirmed threat | — | Secure |
+| Phone ≥45%, fewer than 3 frames | — | Secure |
+| Phone ≥45%, 3 frames confirmed | Under 1.5 s | Suspicious; no blur yet |
+| Confirmed phone | 1.5–3.0 s | Warning; partial dashboard blur |
+| Confirmed phone | At least 3.0 s | Lockdown; sensitive dashboard covered |
+| Phone removed after protection | Under 2.0 s clear | Recovery; protection remains active |
+| Phone removed | At least 2.0 s clear | Secure |
+| More than one face | 1.5–3.0 s | Warning |
+| More than one face | At least 3.0 s | Lockdown |
+| Reset | Immediate | Secure; temporal buffers cleared |
+
+The UI records metadata-only events with timestamp, transition, threat type, actual confidence, duration/state context, and response. Frames are not stored.
+
+## Operational truth states
+
+- MODEL LOADING
+- PROTECTION ACTIVE
+- DEGRADED PROTECTION
+- MODEL ERROR
+- CAMERA OFFLINE
+- BACKEND OFFLINE (shown in runtime status)
+
+The threat state (`SECURE`, `WARNING`, `LOCKDOWN`) is displayed separately from operational readiness. For example, camera-offline cannot masquerade as fully protected merely because no threat has been observed.
 
 ## Architecture
 
 ```text
-Browser webcam
-  → hidden canvas (480 px JPEG, quality 0.7)
-  → WebSocket /ws/analyze every 400 ms
-  → FastAPI connection session
-  → OpenCV grayscale + Haar face cascade
-  → per-session temporal threat engine
-  → structured SECURE / WARNING / LOCKDOWN response
-  → React blur, overlay, detections, timeline, and event log
+Webcam video
+  ├─→ COCO-SSD MobileNet-v2 in browser
+  │     → real phone boxes/confidence
+  │     → consecutive-frame + duration tracker
+  │     → Warning / Lockdown / Recovery
+  │
+  └─→ hidden canvas JPEG every 400 ms (local full system)
+        → FastAPI WebSocket /ws/analyze
+        → OpenCV Haar face count
+        → backend temporal policy
+        → Warning / Lockdown
+
+Combined strongest state
+  → partial blur / full protection overlay
+  → runtime detections + metadata audit log
 ```
+
+Relevant files:
 
 ```text
-.
-├── src/                         React frontend
-│   ├── App.tsx                  webcam, WebSocket, state UI, simulation
-│   └── styles.css               responsive enterprise interface
-├── backend/
-│   ├── app/
-│   │   ├── main.py              FastAPI health + WebSocket service
-│   │   ├── detector.py          real OpenCV frame decoding and face detection
-│   │   ├── threat_engine.py     temporal SECURE/WARNING/LOCKDOWN policy
-│   │   └── schemas.py           typed API contract
-│   ├── tests/                   API and state-transition tests
-│   ├── requirements.txt         runtime dependencies
-│   └── requirements-dev.txt     test dependencies
-├── geometry.py                  existing spatial reasoning core
-├── interval_tree.py             existing augmented AVL interval tree
-├── temporal_engine.py           existing signal-correlation engine
-├── app/core/state_graph.py      existing general threat state graph
-└── .github/workflows/deploy.yml GitHub Pages frontend deployment
+src/App.tsx                         Webcam, COCO inference, WebSocket, UI response
+src/phoneThreatTracker.ts          Configurable phone temporal state machine
+src/phoneThreatTracker.test.ts     One-frame, escalation, recovery, reset tests
+backend/app/main.py                FastAPI health and WebSocket API
+backend/app/detector.py            Real OpenCV image decoding and face detection
+backend/app/threat_engine.py       Face/phone backend temporal policy
+backend/app/schemas.py             Typed response contract
+backend/tests/                     API and backend state tests
+.github/workflows/deploy.yml       GitHub Pages deployment
 ```
 
-## Run the full local system
+## Run the live/browser system
 
-Requirements:
-
-- Node.js 20+
-- Python 3.11+
-- A webcam
-
-### 1. Install dependencies
+Requirements: Node.js 20+ and a webcam.
 
 ```bash
 npm install
-python -m pip install -r backend/requirements.txt
+npm run dev
 ```
 
-For backend tests, install `backend/requirements-dev.txt` instead.
+Open the Vite URL, wait for **MODEL READY**, choose Real Camera Mode, press **Start real camera**, and grant camera permission. Phone detection works without Python.
 
-### 2. Start the detection backend
+## Run the full local system
 
-From the repository root:
+Requirements: Python 3.11+.
 
 ```bash
+python -m pip install -r backend/requirements.txt
 python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
-
-Confirm [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health) reports:
-
-```json
-{
-  "status": "ok",
-  "face_detector": "opencv-haar",
-  "phone_model_loaded": false
-}
-```
-
-### 3. Start the frontend
 
 In a second terminal:
 
@@ -118,111 +120,82 @@ In a second terminal:
 npm run dev
 ```
 
-Open the URL printed by Vite, normally `http://localhost:5173`. Real Camera Mode connects to `ws://127.0.0.1:8000/ws/analyze`. Select **Start real camera** and approve webcam access.
+In development, the frontend defaults to `ws://127.0.0.1:8000/ws/analyze`. In production, no insecure localhost WebSocket is bundled. Set `VITE_BACKEND_WS_URL=wss://<hosted-backend>/ws/analyze` when a hosted backend exists. Without that variable, the Pages app reports the face backend as unavailable while browser-side phone protection continues working.
 
-To use another backend URL:
-
-```bash
-VITE_BACKEND_WS_URL=ws://192.168.1.10:8000/ws/analyze npm run dev
-```
-
-On PowerShell:
-
-```powershell
-$env:VITE_BACKEND_WS_URL='ws://192.168.1.10:8000/ws/analyze'
-npm run dev
-```
-
-## State rules
-
-| Evidence | Duration | Result |
-| --- | ---: | --- |
-| Zero or one face | Any | Secure |
-| More than one face | Under 1.5 s | Secure |
-| More than one face | 1.5–3.0 s | Warning + partial blur |
-| More than one face | At least 3.0 s | Lockdown + full overlay |
-| Qualifying evidence disappears | 2.0 s clear | Secure |
-| Reset pressed | Immediate | Secure + 3.0 s cooldown |
-
-Phone thresholds are implemented in the temporal engine for a future real detector: 1 second for Warning and 2 seconds for Lockdown. They cannot activate while the model is absent because no phone detections are generated.
-
-## WebSocket contract
-
-Client request:
-
-```json
-{
-  "frame": "data:image/jpeg;base64,...",
-  "timestamp": 1783350000000
-}
-```
-
-Server response:
-
-```json
-{
-  "state": "SECURE",
-  "detections": [
-    { "type": "FACE", "confidence": 0.87, "bbox": [42, 31, 96, 96] }
-  ],
-  "faces_count": 1,
-  "phone_detected": false,
-  "threat_reason": null,
-  "action": "NONE",
-  "timestamp": 1783350000000,
-  "phone_model_loaded": false,
-  "backend": "opencv-haar"
-}
-```
-
-Reset the connection's temporal buffers with:
-
-```json
-{ "type": "reset", "timestamp": 1783350000000 }
-```
+Health endpoint: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health).
 
 ## Modes
 
-### Real Camera Mode (default)
+### Real Camera Mode
 
-- Attempts to connect to the local backend.
-- Does not request camera permission until **Start real camera** is pressed.
-- When the backend is offline, says: **Backend not connected. Real detection unavailable.**
-- Does not fall back to fake or random results.
+- Runs actual COCO-SSD phone inference.
+- Uses the face backend when connected.
+- Never replaces failed inference with simulation.
+- Shows model errors and degraded/offline components explicitly.
 
 ### Simulation Mode
 
-- Clearly labeled **Simulation Mode — manual triggers only**.
-- Does not access the camera or backend for detection.
-- Provides Simulate Phone, Simulate Second Face, Simulate Lockdown, and Reset controls.
-- Every generated log entry begins with `Simulation:`.
+- Labeled **Simulation Mode — manual triggers only**.
+- Manual buttons are disabled outside Simulation Mode.
+- Every event begins with `Simulation:` and cannot contaminate real inference state.
 
-## Testing
+## Test commands
 
 ```bash
 npm run build
+npx vitest run
 python -m pytest -q backend/tests
 python -m pytest -q
 ```
 
-The backend tests verify blank real image decoding produces no fake detections, malformed images are rejected, single faces remain Secure, brief second faces do not accumulate, the 1.5/3.0-second transitions work, and Reset clears temporal buffers.
+Automated coverage includes:
 
-## GitHub Pages
+- one-frame phone evidence does not alert;
+- confidence below 0.45 does not alert;
+- three frames begin suspicious tracking;
+- 1.5 seconds reaches Warning;
+- 3 seconds reaches Lockdown;
+- phone removal enters Recovery and requires 2 seconds clear;
+- reset clears accumulated phone evidence;
+- blank real images produce no fabricated backend detections;
+- malformed frames are rejected;
+- one face stays Secure;
+- second-face Warning and Lockdown transitions work through the WebSocket contract.
 
-Pushes to `main` run `.github/workflows/deploy.yml`. It builds and deploys only the static frontend. On the public site, Real Camera Mode correctly reports the local backend as unavailable unless the visitor is deliberately running a compatible service. Simulation Mode remains available as the portfolio fallback.
+## Mandatory real-camera test matrix
+
+| Test | Expected |
+| --- | --- |
+| One person, no phone | One face locally; no phone; Secure |
+| One person holding a prominent smartphone | Real phone box → Suspicious → Warning → Lockdown |
+| Phone removed | Recovery for 2 seconds → Secure |
+| Two people, no phone | Warning after 1.5 seconds; Lockdown after 3 seconds |
+| Empty room | No fabricated phone or face detections |
+| Random objects | No phone alert unless COCO-SSD returns a qualifying `cell phone` |
+| Camera disabled | CAMERA OFFLINE |
+| Phone model download fails | MODEL ERROR; camera start disabled |
+| Face backend absent | DEGRADED PROTECTION; browser phone protection remains available |
+
+## Known limitations
+
+- COCO-SSD accuracy depends on lighting, camera quality, phone size, occlusion, and pose. It is not guaranteed to recognize every device.
+- A 0.45 threshold favors recall for a prominently held phone but can still produce false positives; temporal confirmation reduces—not eliminates—them.
+- Haar cascades can miss profiles, partially covered faces, or poor lighting.
+- The live Pages app has no deployed Python face backend. Deploying FastAPI behind HTTPS/WSS is a separate infrastructure step.
+- This is a portfolio prototype, not a certified or production-ready DLP control.
+
+## Privacy
+
+COCO-SSD processes video frames in the browser. When the optional local backend is connected, downscaled JPEGs are sent only to the configured WebSocket. The provided backend processes them in memory and stores no images, biometric templates, or identities. Audit events contain metadata only.
 
 ## CV Project Description
 
-**GlassWall AI — Real-Time Optical DLP Security Platform**
+**GlassWall AI — Real-Time Optical DLP Security Prototype**
 
-- Built a real-time Optical Data Loss Prevention prototype that streams webcam frames from React to FastAPI over WebSockets and protects sensitive UI from persistent unauthorized observers.
-- Implemented real OpenCV face detection and a temporal security state engine with evidence persistence, clear-scene hysteresis, reset cooldown, and auditable Secure/Warning/Lockdown transitions.
-- Delivered a responsive GitHub Pages portfolio frontend with honest backend-offline behavior, explicit manual simulation, typed detection contracts, automated deployment, and tested Python inference services.
+- Built a real-time optical DLP prototype using browser-side COCO-SSD smartphone detection, actual bounding boxes, confidence thresholds, and temporal Warning/Lockdown/Recovery controls.
+- Integrated React webcam capture with a FastAPI WebSocket and OpenCV face-counting pipeline for persistent second-observer protection without face recognition.
+- Implemented operational health states, metadata-only security audits, responsive UI protection, automated tests, and GitHub Pages deployment with honest degraded-mode reporting.
 
 Short version:
 
-> GlassWall AI — real-time optical DLP prototype using React webcam capture, FastAPI WebSockets, OpenCV face detection, and temporal UI lockdown.
-
-## Data and privacy
-
-The local frontend sends webcam frames only to the configured WebSocket endpoint. The provided backend processes each frame in memory and does not persist images, identities, logs, or biometric templates. Dashboard values and identities are fictional demo data.
+> GlassWall AI — real-time optical DLP prototype using COCO-SSD phone detection, OpenCV face counting, temporal validation, and automatic sensitive-UI protection.

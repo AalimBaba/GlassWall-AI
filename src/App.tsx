@@ -5,12 +5,15 @@ import {
   Network, Radio, RefreshCw, ScanFace, Shield, ShieldAlert, ShieldCheck, Smartphone,
   Terminal, TriangleAlert, UserRoundX, Users, Workflow, X, Zap
 } from 'lucide-react'
+import type { DetectedObject, ObjectDetection } from '@tensorflow-models/coco-ssd'
+import { PHONE_POLICY, PhoneThreatTracker, type PhoneTrackerSnapshot } from './phoneThreatTracker'
 
 type Threat = { mode: 'Warning' | 'Lockdown'; reason: string; detail: string; confidence: number; action: string; icon: typeof Smartphone }
 type Event = { id: number; title: string; time: string; confidence?: number; action: string; mode: string }
 type DetectionMode = 'real' | 'simulation'
 type CameraState = 'off' | 'requesting' | 'scanning' | 'error'
 type BackendState = 'connecting' | 'connected' | 'offline'
+type ModelState = 'loading' | 'ready' | 'error'
 type BackendDetection = { type: 'FACE' | 'PHONE' | 'CAMERA'; confidence: number; bbox: [number, number, number, number] }
 type AnalysisResult = { state: 'SECURE' | 'WARNING' | 'LOCKDOWN'; detections: BackendDetection[]; faces_count: number; phone_detected: boolean; threat_reason: string | null; action: 'NONE' | 'BLUR' | 'LOCKDOWN'; timestamp: number; phone_model_loaded: boolean; error?: string }
 
@@ -40,10 +43,19 @@ const modules = [
   ['03', 'Dynamic Threat State Machine', 'Controls validated movement through secure, warning, lockdown, and recovery states.', 'Implemented · Python'],
   ['04', 'FastAPI Frame Service', 'Receives compressed JPEG frames over WebSocket and returns a structured detection contract.', 'Implemented · Python'],
   ['05', 'OpenCV Face Detector', 'Runs the bundled frontal-face cascade and reports actual face boxes and detector scores.', 'Implemented · Python'],
-  ['06', 'Phone Detection Adapter', 'Reserved for a local YOLO or COCO model; disabled honestly while no model file is installed.', 'Model required'],
+  ['06', 'Browser Phone Detector', 'Runs MobileNet-v2 COCO-SSD on live webcam frames and validates the cell phone class over time.', 'Implemented · TensorFlow.js'],
 ]
 
 function now() { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }
+
+let phoneModelPromise: Promise<ObjectDetection> | null = null
+function getPhoneModel() {
+  phoneModelPromise ??= Promise.all([import('@tensorflow/tfjs'), import('@tensorflow-models/coco-ssd')]).then(async ([tf, cocoSsd]) => {
+    await tf.ready()
+    return cocoSsd.load({ base: 'mobilenet_v2' })
+  })
+  return phoneModelPromise
+}
 
 export default function App() {
   const [active, setActive] = useState<Threat | null>(null)
@@ -54,15 +66,27 @@ export default function App() {
   const [cameraState, setCameraState] = useState<CameraState>('off')
   const [cameraMessage, setCameraMessage] = useState('Camera inactive — no threat detected')
   const [detections, setDetections] = useState<BackendDetection[]>([])
-  const [phoneModelLoaded, setPhoneModelLoaded] = useState(false)
+  const [phoneModelState, setPhoneModelState] = useState<ModelState>('loading')
+  const [phoneModelError, setPhoneModelError] = useState('')
+  const [phoneDetections, setPhoneDetections] = useState<DetectedObject[]>([])
+  const [phoneSnapshot, setPhoneSnapshot] = useState<PhoneTrackerSnapshot>({ state: 'SECURE', durationMs: 0, confidence: 0, confirmed: false })
+  const [backendAnalysis, setBackendAnalysis] = useState<AnalysisResult | null>(null)
+  const [inferenceFps, setInferenceFps] = useState(0)
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
+  const phoneModelRef = useRef<ObjectDetection | null>(null)
+  const phoneTrackerRef = useRef(new PhoneThreatTracker())
+  const phoneInferenceBusyRef = useRef(false)
+  const phoneLastFrameAtRef = useRef(0)
+  const phoneLastStateRef = useRef<PhoneTrackerSnapshot['state']>('SECURE')
+  const phoneProtectionRef = useRef<'Warning' | 'Lockdown' | null>(null)
+  const phoneLastConfidenceRef = useRef(0)
   const frameTimerRef = useRef<number | null>(null)
   const awaitingResultRef = useRef(false)
   const lastBackendStateRef = useRef<'SECURE' | 'WARNING' | 'LOCKDOWN'>('SECURE')
-  const backendUrl = import.meta.env.VITE_BACKEND_WS_URL || 'ws://127.0.0.1:8000/ws/analyze'
+  const backendUrl = import.meta.env.VITE_BACKEND_WS_URL || (import.meta.env.DEV ? 'ws://127.0.0.1:8000/ws/analyze' : '')
 
   const simulate = (key: keyof typeof threats) => {
     if (detectionMode !== 'simulation') return
@@ -74,6 +98,10 @@ export default function App() {
   const reset = () => {
     setActive(null)
     setDetections([])
+    setPhoneDetections([])
+    setPhoneSnapshot(phoneTrackerRef.current.reset())
+    phoneLastStateRef.current = 'SECURE'
+    phoneProtectionRef.current = null
     lastBackendStateRef.current = 'SECURE'
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify({ type: 'reset', timestamp: Date.now() }))
     setEvents(old => [{ id: Date.now(), title: 'Session reset', time: now(), action: 'Returned to secure state; 3s cooldown active', mode: 'Secure' }, ...old].slice(0, 6))
@@ -89,13 +117,54 @@ export default function App() {
     setCameraState('off')
     setCameraMessage('Camera not analyzed yet')
     setDetections([])
+    setPhoneDetections([])
+    setPhoneSnapshot(phoneTrackerRef.current.reset())
+    phoneProtectionRef.current = null
+  }
+
+  const runPhoneDetection = async () => {
+    const video = videoRef.current
+    const model = phoneModelRef.current
+    if (!video || !model || video.readyState < 2 || phoneInferenceBusyRef.current) return
+    phoneInferenceBusyRef.current = true
+    const startedAt = performance.now()
+    try {
+      const predictions = await model.detect(video, 20, PHONE_POLICY.confidenceThreshold)
+      const phones = predictions.filter(item => /cell phone|smartphone|mobile phone|phone/i.test(item.class))
+      setPhoneDetections(phones)
+      const highest = Math.max(0, ...phones.map(item => item.score))
+      if (highest > 0) phoneLastConfidenceRef.current = highest
+      const timestamp = Date.now()
+      const snapshot = phoneTrackerRef.current.update(phones.length > 0, highest, timestamp)
+      setPhoneSnapshot(snapshot)
+      const elapsed = performance.now() - startedAt
+      const sinceLast = phoneLastFrameAtRef.current ? startedAt - phoneLastFrameAtRef.current : elapsed
+      phoneLastFrameAtRef.current = startedAt
+      setInferenceFps(Math.round(10000 / Math.max(elapsed, sinceLast)) / 10)
+
+      if (snapshot.state === 'WARNING') phoneProtectionRef.current = 'Warning'
+      if (snapshot.state === 'LOCKDOWN') phoneProtectionRef.current = 'Lockdown'
+      if (snapshot.state === 'SECURE') phoneProtectionRef.current = null
+      if (snapshot.state !== phoneLastStateRef.current && ['WARNING', 'LOCKDOWN', 'RECOVERY', 'SECURE'].includes(snapshot.state)) {
+        const transition = `${phoneLastStateRef.current} → ${snapshot.state}`
+        setEvents(old => [{ id: timestamp, title: `Real detection: phone ${transition}`, time: now(), confidence: highest ? Math.round(highest * 100) : undefined, action: snapshot.state === 'LOCKDOWN' ? 'Sensitive data obscured' : snapshot.state === 'WARNING' ? 'Privacy blur enabled' : snapshot.state === 'RECOVERY' ? 'Protection held during recovery' : 'Returned to secure', mode: snapshot.state === 'LOCKDOWN' ? 'Lockdown' : snapshot.state === 'WARNING' || snapshot.state === 'RECOVERY' ? 'Warning' : 'Secure' }, ...old].slice(0, 10))
+      }
+      phoneLastStateRef.current = snapshot.state
+    } catch (error) {
+      setPhoneModelState('error')
+      setPhoneModelError(error instanceof Error ? error.message : 'Phone inference failed')
+    } finally {
+      phoneInferenceBusyRef.current = false
+    }
   }
 
   const sendFrame = () => {
     const video = videoRef.current
     const canvas = canvasRef.current
     const socket = socketRef.current
-    if (!video || !canvas || video.readyState < 2 || !socket || socket.readyState !== WebSocket.OPEN || awaitingResultRef.current) return
+    if (!video || !canvas || video.readyState < 2) return
+    void runPhoneDetection()
+    if (!socket || socket.readyState !== WebSocket.OPEN || awaitingResultRef.current) return
     canvas.width = 480
     canvas.height = Math.round(480 * video.videoHeight / video.videoWidth) || 360
     const context = canvas.getContext('2d')
@@ -108,7 +177,7 @@ export default function App() {
   const startCamera = async () => {
     stopCamera()
     setDetectionMode('real')
-    if (backendState !== 'connected') { setCameraState('error'); setCameraMessage('Backend not connected. Real detection unavailable.'); return }
+    if (phoneModelState !== 'ready') { setCameraState('error'); setCameraMessage(phoneModelState === 'loading' ? 'Phone model is still loading.' : 'Phone model failed to load. Real phone detection unavailable.'); return }
     setCameraState('requesting')
     setCameraMessage('Waiting for webcam permission…')
     try {
@@ -125,10 +194,16 @@ export default function App() {
   }
 
   const chooseSimulation = () => { stopCamera(); setDetectionMode('simulation'); setActive(null) }
-  const chooseReal = () => { setDetectionMode('real'); setActive(null); setCameraMessage(backendState === 'connected' ? 'Camera inactive — no threat detected' : 'Backend not connected. Real detection unavailable.') }
+  const chooseReal = () => { setDetectionMode('real'); setActive(null); setCameraMessage(backendState === 'connected' ? 'Camera inactive — no threat detected' : 'Face backend unavailable. Browser phone detection remains available.') }
 
   const connectBackend = () => {
     socketRef.current?.close()
+    if (!backendUrl) {
+      setBackendState('offline')
+      awaitingResultRef.current = false
+      setCameraMessage('No hosted face backend configured. Browser phone detection remains available.')
+      return
+    }
     setBackendState('connecting')
     const socket = new WebSocket(backendUrl)
     socketRef.current = socket
@@ -139,17 +214,14 @@ export default function App() {
       try { result = JSON.parse(event.data) as AnalysisResult } catch { return }
       if (result.error) { setCameraMessage(`Backend rejected frame: ${result.error}`); return }
       setDetections(result.detections)
-      setPhoneModelLoaded(result.phone_model_loaded)
+      setBackendAnalysis(result)
       const faceText = `${result.faces_count} face${result.faces_count === 1 ? '' : 's'} visible`
       if (result.state === 'SECURE') {
-        setActive(null)
-        setCameraMessage(`Camera active — ${faceText}, no threat detected`)
+        setCameraMessage(`Camera active — ${faceText}; phone detector ${phoneModelState}`)
       } else {
         const confidence = Math.round(Math.max(0, ...result.detections.map(item => item.confidence)) * 100)
-        const threat: Threat = { mode: result.state === 'LOCKDOWN' ? 'Lockdown' : 'Warning', reason: result.threat_reason || 'Persistent visual threat', detail: `${faceText}. State returned by the local OpenCV temporal engine.`, confidence, action: result.action === 'LOCKDOWN' ? 'Sensitive data obscured' : 'Privacy blur enabled', icon: result.phone_detected ? Smartphone : UserRoundX }
-        setActive(threat)
         setCameraMessage(`${result.state}: ${result.threat_reason}`)
-        if (lastBackendStateRef.current !== result.state) setEvents(old => [{ id: result.timestamp, title: `Real detection: ${result.threat_reason}`, time: now(), confidence, action: threat.action, mode: threat.mode }, ...old].slice(0, 8))
+        if (lastBackendStateRef.current !== result.state) setEvents(old => [{ id: result.timestamp, title: `Real detection: ${result.threat_reason}`, time: now(), confidence, action: result.action === 'LOCKDOWN' ? 'Sensitive data obscured' : 'Privacy blur enabled', mode: result.state === 'LOCKDOWN' ? 'Lockdown' : 'Warning' }, ...old].slice(0, 10))
       }
       lastBackendStateRef.current = result.state
     }
@@ -157,12 +229,57 @@ export default function App() {
     socket.onclose = () => { setBackendState('offline'); awaitingResultRef.current = false; setCameraMessage('Backend not connected. Real detection unavailable.') }
   }
 
+  const loadPhoneModel = async () => {
+    setPhoneModelState('loading')
+    setPhoneModelError('')
+    try {
+      phoneModelRef.current = await getPhoneModel()
+      setPhoneModelState('ready')
+      setCameraMessage(backendState === 'connected' ? 'Protection models ready — start camera' : 'Phone model ready — face backend offline')
+    } catch (error) {
+      phoneModelPromise = null
+      setPhoneModelState('error')
+      setPhoneModelError(error instanceof Error ? error.message : 'Unable to download COCO-SSD model assets')
+      setCameraMessage('Phone model error — real phone protection unavailable')
+    }
+  }
+
   useEffect(() => {
     const close = () => setMenu(false)
     window.addEventListener('resize', close)
     connectBackend()
+    void loadPhoneModel()
     return () => { window.removeEventListener('resize', close); if (frameTimerRef.current) window.clearInterval(frameTimerRef.current); streamRef.current?.getTracks().forEach(track => track.stop()); socketRef.current?.close() }
   }, [])
+
+  useEffect(() => {
+    if (detectionMode === 'simulation') return
+    const backendRank = backendAnalysis?.state === 'LOCKDOWN' ? 2 : backendAnalysis?.state === 'WARNING' ? 1 : 0
+    const phoneProtection = phoneSnapshot.state === 'LOCKDOWN' ? 'Lockdown' : phoneSnapshot.state === 'WARNING' ? 'Warning' : phoneSnapshot.state === 'RECOVERY' ? phoneProtectionRef.current : null
+    const phoneRank = phoneProtection === 'Lockdown' ? 2 : phoneProtection === 'Warning' ? 1 : 0
+    if (phoneRank === 0 && backendRank === 0) { setActive(null); return }
+
+    if (phoneRank >= backendRank) {
+      const recovering = phoneSnapshot.state === 'RECOVERY'
+      const confidence = Math.round(phoneLastConfidenceRef.current * 100)
+      setActive({
+        mode: phoneProtection || 'Warning',
+        reason: recovering ? 'Phone removed — recovery validation active' : 'Real cell phone detected',
+        detail: recovering ? `Sensitive content remains protected for ${(PHONE_POLICY.recoveryMs / 1000).toFixed(1)} seconds of clear frames.` : `COCO-SSD confirmed a phone for ${(phoneSnapshot.durationMs / 1000).toFixed(1)} seconds from actual webcam frames.`,
+        confidence,
+        action: phoneProtection === 'Lockdown' ? 'Sensitive content protected — optical exfiltration threat detected.' : 'Privacy blur enabled',
+        icon: Smartphone,
+      })
+      return
+    }
+
+    const confidence = Math.round(Math.max(0, ...(backendAnalysis?.detections || []).map(item => item.confidence)) * 100)
+    setActive({ mode: backendAnalysis?.state === 'LOCKDOWN' ? 'Lockdown' : 'Warning', reason: backendAnalysis?.threat_reason || 'Persistent second-person threat', detail: `${backendAnalysis?.faces_count || 0} faces visible. State returned by the local OpenCV temporal engine.`, confidence, action: backendAnalysis?.state === 'LOCKDOWN' ? 'Sensitive content protected — optical exfiltration threat detected.' : 'Privacy blur enabled', icon: UserRoundX })
+  }, [backendAnalysis, detectionMode, phoneSnapshot])
+
+  const operationalState = phoneModelState === 'loading' ? 'MODEL LOADING' : phoneModelState === 'error' ? 'MODEL ERROR' : cameraState !== 'scanning' ? 'CAMERA OFFLINE' : backendState !== 'connected' ? 'DEGRADED PROTECTION' : 'PROTECTION ACTIVE'
+  const faceCount = backendAnalysis?.faces_count || 0
+  const highestPhoneConfidence = Math.max(0, ...phoneDetections.map(item => item.score))
 
   return <div className="app">
     <header className="nav-wrap">
@@ -195,7 +312,7 @@ export default function App() {
           <div className="radar">
             <div className="radar-ring r1"/><div className="radar-ring r2"/><div className="radar-ring r3"/>
             <div className="scan-line"/><div className="radar-core"><Fingerprint size={42}/><b>PROTECTED</b><small>OPTICAL PERIMETER</small></div>
-            <div className="signal s1"><Smartphone/><span>Phone model</span><b>Required</b></div>
+            <div className="signal s1"><Smartphone/><span>Phone model</span><b>COCO-SSD</b></div>
             <div className="signal s2"><ScanFace/><span>Face detection</span><b>Implemented</b></div>
             <div className="signal s3"><Activity/><span>Temporal policy</span><b>Active</b></div>
           </div>
@@ -207,19 +324,31 @@ export default function App() {
       <section className="section shell" id="demo">
         <SectionHead kicker="INTERACTIVE PROTOTYPE" title="Put the dashboard under pressure." text="Choose an explicit simulation or opt in to experimental, browser-side object detection. Nothing triggers automatically at startup." />
         <div className="mode-panel">
-          <div><span>DETECTION MODE</span><b>{detectionMode === 'simulation' ? 'Simulation Mode — manual triggers only' : 'Real Camera Mode'}</b><small>{detectionMode === 'simulation' ? 'No camera or automatic analysis.' : backendState === 'connected' ? 'FastAPI + OpenCV backend connected.' : 'Backend not connected. Real detection unavailable.'}</small></div>
+          <div><span>DETECTION MODE</span><b>{detectionMode === 'simulation' ? 'Simulation Mode — manual triggers only' : 'Real Camera Mode'}</b><small>{detectionMode === 'simulation' ? 'No camera or automatic analysis.' : `${operationalState}. Browser phone detector ${phoneModelState}; face backend ${backendState}.`}</small></div>
           <div className="mode-switch"><button className={detectionMode === 'real' ? 'selected' : ''} onClick={chooseReal}><Camera/> Real Camera Mode</button><button className={detectionMode === 'simulation' ? 'selected' : ''} onClick={chooseSimulation}><Zap/> Simulation Mode</button></div>
         </div>
         <div className={`camera-panel ${detectionMode === 'simulation' ? 'camera-hidden' : ''}`}>
-          <div className="camera-view"><video ref={videoRef} muted playsInline/><canvas ref={canvasRef} hidden/><div className="camera-corners"/><span className={`camera-live ${cameraState}`}><i/>{cameraState === 'scanning' ? 'REAL FRAME ANALYSIS ACTIVE' : cameraState.toUpperCase()}</span></div>
-          <div className="camera-info"><div className="kicker">LOCAL REAL-TIME PIPELINE</div><h3>FastAPI + OpenCV face detection</h3><p>{cameraMessage}</p><div className="backend-badges"><span className={backendState}><i/>Backend: {backendState}</span><span className={phoneModelLoaded ? 'connected' : 'offline'}><i/>Phone model: {phoneModelLoaded ? 'loaded' : 'not loaded'}</span></div><div className="camera-rules"><span><Check/> Second face 1.5s → Warning</span><span><Check/> Second face 3.0s → Lockdown</span><span><Check/> Clear scene 2.0s → Secure</span></div>{detections.length > 0 && <div className="active-detections">{detections.map((item, index) => <span key={`${item.type}-${index}`}>{item.type} · {Math.round(item.confidence * 100)}% · [{item.bbox.join(', ')}]</span>)}</div>}<div className="camera-actions">{cameraState !== 'scanning' ? <button onClick={startCamera} disabled={backendState !== 'connected'}><Camera/> Start real camera</button> : <button onClick={stopCamera}><X/> Stop camera</button>}{backendState !== 'connected' && <button onClick={connectBackend}><RefreshCw/> Retry backend</button>}</div></div>
+          <div className="camera-view">
+            <video ref={videoRef} muted playsInline/><canvas ref={canvasRef} hidden/><div className="camera-corners"/>
+            {phoneDetections.map((item, index) => { const width = videoRef.current?.videoWidth || 640; const height = videoRef.current?.videoHeight || 480; return <div className="phone-box" key={`${item.class}-${index}`} style={{ left: `${100 - ((item.bbox[0] + item.bbox[2]) / width * 100)}%`, top: `${item.bbox[1] / height * 100}%`, width: `${item.bbox[2] / width * 100}%`, height: `${item.bbox[3] / height * 100}%` }}><span>PHONE {Math.round(item.score * 100)}%</span></div> })}
+            <span className={`camera-live ${cameraState}`}><i/>{cameraState === 'scanning' ? 'REAL FRAME ANALYSIS ACTIVE' : cameraState.toUpperCase()}</span>
+          </div>
+          <div className="camera-info">
+            <div className="kicker">REAL-TIME OPTICAL DLP</div><h3>COCO-SSD phone + OpenCV face detection</h3><div className={`operational-status ${operationalState.toLowerCase().replaceAll(' ', '-')}`}>{operationalState}</div><p>{cameraMessage}</p>
+            <div className="backend-badges"><span className={backendState}><i/>Face backend: {backendState}</span><span className={phoneModelState === 'ready' ? 'connected' : phoneModelState === 'error' ? 'offline' : 'connecting'}><i/>Phone model: {phoneModelState === 'ready' ? 'MODEL READY' : phoneModelState === 'error' ? 'MODEL ERROR' : 'MODEL LOADING'}</span></div>
+            {phoneModelError && <div className="model-error">{phoneModelError}</div>}
+            <div className="runtime-grid"><span><b>{inferenceFps}</b> inference FPS</span><span><b>{faceCount}</b> faces</span><span><b>{phoneDetections.length}</b> phones</span><span><b>{Math.round(highestPhoneConfidence * 100)}%</b> phone confidence</span></div>
+            <div className="camera-rules"><span><Check/> Phone ≥{Math.round(PHONE_POLICY.confidenceThreshold * 100)}% + {PHONE_POLICY.consecutiveFrames} frames</span><span><Check/> 1.5s Warning · 3.0s Lockdown</span><span><Check/> 2.0s clear → Recovery → Secure</span></div>
+            {(detections.length > 0 || phoneDetections.length > 0) && <div className="active-detections">{phoneDetections.map((item, index) => <span key={`phone-${index}`}>PHONE · {Math.round(item.score * 100)}% · [{item.bbox.map(Math.round).join(', ')}]</span>)}{detections.map((item, index) => <span key={`${item.type}-${index}`}>{item.type} · {Math.round(item.confidence * 100)}% · [{item.bbox.join(', ')}]</span>)}</div>}
+            <div className="camera-actions">{cameraState !== 'scanning' ? <button onClick={startCamera} disabled={phoneModelState !== 'ready'}><Camera/> Start real camera</button> : <button onClick={stopCamera}><X/> Stop camera</button>}{phoneModelState === 'error' && <button onClick={loadPhoneModel}><RefreshCw/> Retry phone model</button>}{backendState !== 'connected' && <button onClick={connectBackend}><RefreshCw/> Retry face backend</button>}</div>
+          </div>
         </div>
-        <div className={`demo-shell ${active ? active.mode.toLowerCase() : 'secure'}`}>
+        <div className={`demo-shell ${active ? active.mode.toLowerCase() : 'secure'} ${detectionMode === 'real' && operationalState !== 'PROTECTION ACTIVE' ? 'degraded' : ''}`}>
           <div className="demo-topbar">
             <div><span className="mini-logo"><Shield size={15}/></span><b>MERIDIAN</b><span className="classified">INTERNAL · CONFIDENTIAL</span></div>
-            <div className="status-cluster"><span className="pulse"/><span>SECURITY MODE</span><b>{active?.mode.toUpperCase() || 'SECURE'}</b></div>
+            <div className="status-cluster"><span className="pulse"/><span>THREAT STATE</span><b>{active?.mode.toUpperCase() || 'SECURE'}</b></div>
           </div>
-          {!active && <div className="secure-banner"><ShieldCheck/><div><b>No active threat detected</b><span>{detectionMode === 'real' ? cameraMessage : 'Camera inactive — manual simulation only'}</span></div><strong>{detectionMode === 'simulation' ? 'SIMULATION MODE' : 'REAL CAMERA MODE'}</strong></div>}
+          {!active && <div className="secure-banner"><ShieldCheck/><div><b>No confirmed threat</b><span>{detectionMode === 'real' ? `${operationalState} · ${cameraMessage}` : 'Camera inactive — manual simulation only'}</span></div><strong>{detectionMode === 'simulation' ? 'SIMULATION MODE' : operationalState}</strong></div>}
           {active && <div className="threat-banner">
             <div className="threat-icon"><active.icon/></div><div><b>{active.reason}</b><span>{active.detail}</span></div>
             <div className="confidence"><span>CONFIDENCE</span><b>{active.confidence}%</b></div><div className="banner-meta"><span>{now()}</span><b>{active.action}</b></div>
@@ -263,7 +392,7 @@ export default function App() {
 
       <section className="section about-section" id="about"><div className="shell about-grid">
         <div className="about-visual"><div className="glass-layers"><div className="layer l1"/><div className="layer l2"/><div className="layer l3"><Shield size={60}/></div></div><div className="stat-card top"><b>&lt;40ms</b><span>target response latency</span></div><div className="stat-card bottom"><b>3</b><span>implemented reasoning engines</span></div></div>
-        <div><div className="kicker">THE ANALOG GAP</div><h2>Security shouldn’t stop at the edge of the screen.</h2><p className="lead">GlassWall AI is a working local security prototype using webcam frames, FastAPI WebSockets, OpenCV face detection, and temporal threat evaluation.</p><p>Traditional DLP watches files, networks, and endpoints. GlassWall focuses on what happens after sensitive data is rendered: unauthorized observers and physical capture risks.</p><div className="honesty"><ShieldCheck/><div><b>Live frontend, local inference</b><span>GitHub Pages hosts the frontend and manual simulation. Real face detection runs locally because static hosting cannot execute Python inference. Phone detection remains disabled until a YOLO/COCO model is added.</span></div></div></div>
+        <div><div className="kicker">THE ANALOG GAP</div><h2>Security shouldn’t stop at the edge of the screen.</h2><p className="lead">GlassWall AI combines browser-side COCO-SSD phone detection with local FastAPI/OpenCV face counting and temporal threat evaluation.</p><p>Traditional DLP watches files, networks, and endpoints. GlassWall focuses on what happens after sensitive data is rendered: unauthorized observers and physical capture risks.</p><div className="honesty"><ShieldCheck/><div><b>Real inference, explicit limitations</b><span>GitHub Pages runs real phone detection locally in the browser. The optional FastAPI service adds OpenCV second-face detection when run on the same machine. Simulation remains isolated and manual.</span></div></div></div>
       </div></section>
 
       <section className="section shell" id="architecture"><SectionHead kicker="SYSTEM ARCHITECTURE" title="Working modules, clearly separated." text="The local system streams compressed webcam frames to FastAPI, runs real OpenCV face analysis, applies temporal policy, and returns an auditable UI state." />
@@ -274,7 +403,7 @@ export default function App() {
 
       <section className="section shell" id="technology"><SectionHead kicker="TOOLS & TECHNOLOGIES" title="What’s built—and what comes next." text="Every capability is labeled honestly: implemented in this repository, designed at the architecture layer, or planned for integration." />
         <div className="tech-grid">
-          <Tech title="Frontend client" icon={Code2} status="IMPLEMENTED" items={['React + TypeScript', 'Webcam frame capture', 'WebSocket streaming', 'Real-time blur / lockdown', 'GitHub Pages workflow']}/>
+          <Tech title="Frontend + phone AI" icon={Code2} status="IMPLEMENTED" items={['React + TypeScript', 'COCO-SSD MobileNet-v2', 'Real phone bounding boxes', 'Temporal phone tracker', 'GitHub Pages workflow']}/>
           <Tech title="Reasoning core" icon={BrainCircuit} status="IMPLEMENTED" items={['Python threat models', '3D spatial ray-casting', 'Augmented AVL interval tree', 'Threat state graph', 'Thread-safe evaluation']}/>
           <Tech title="Local detection service" icon={Terminal} status="IMPLEMENTED" items={['FastAPI + WebSockets', 'OpenCV Haar faces', 'Temporal state engine', 'Per-session reset cooldown', 'Structured detection API']}/>
           <Tech title="Cloud pipeline" icon={Cloud} status="ARCHITECTURE READY" items={['Azure Container Apps', 'Event Grid + Functions', 'Cosmos DB threat ledger', 'Static Web Apps option', 'GitHub Pages live demo']}/>
