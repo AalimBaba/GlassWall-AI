@@ -1,4 +1,4 @@
-import type { AdminOverview, DeviceInventory, EndpointHeartbeatPayload, EndpointHeartbeatResponse } from './types'
+import type { AdminOverview, DeviceInventory, EndpointHeartbeatPayload, EndpointHeartbeatResponse, IncidentDetail, IncidentList, IncidentStatus } from './types'
 
 export class ApiError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -60,6 +60,32 @@ export function createApiClient({ baseUrl, timeoutMs }: ApiClientOptions) {
         baseUrl,
         `/api/organizations/${organizationId}/heartbeats`,
         { method: 'POST', body: JSON.stringify(payload), signal },
+        timeoutMs,
+      )
+    },
+    getIncidents(organizationId: string, filters: { status?: string; severity?: string; search?: string } = {}, signal?: AbortSignal) {
+      const params = new URLSearchParams()
+      if (filters.status) params.set('status', filters.status)
+      if (filters.severity) params.set('severity', filters.severity)
+      const query = params.toString()
+      return request<IncidentList>(baseUrl, `/api/organizations/${organizationId}/incidents${query ? `?${query}` : ''}`, { signal }, timeoutMs)
+    },
+    getIncident(organizationId: string, incidentId: string, signal?: AbortSignal) {
+      return request<IncidentDetail>(baseUrl, `/api/organizations/${organizationId}/incidents/${incidentId}`, { signal }, timeoutMs)
+    },
+    updateIncidentStatus(organizationId: string, incidentId: string, status: IncidentStatus, reason?: string, signal?: AbortSignal) {
+      return request<IncidentDetail>(
+        baseUrl,
+        `/api/organizations/${organizationId}/incidents/${incidentId}/status`,
+        { method: 'POST', body: JSON.stringify({ status, reason }), signal },
+        timeoutMs,
+      )
+    },
+    addIncidentNote(organizationId: string, incidentId: string, note: string, signal?: AbortSignal) {
+      return request<IncidentDetail>(
+        baseUrl,
+        `/api/organizations/${organizationId}/incidents/${incidentId}/notes`,
+        { method: 'POST', body: JSON.stringify({ note }), signal },
         timeoutMs,
       )
     },

@@ -148,3 +148,77 @@ def test_zero_state_overview_and_invalid_org(repo: SaaSRepository) -> None:
 
     with pytest.raises(TenantAccessError):
         repo.list_endpoint_health("missing-org")
+
+
+def test_confirmed_threat_heartbeat_creates_and_dedupes_incident(repo: SaaSRepository) -> None:
+    org, workspace, device, session = make_endpoint(repo)
+    now = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    warning = HeartbeatInput(session, workspace, device, None, "WARNING", True, True, True, 25, 67, now, "test")
+
+    repo.record_heartbeat(org, warning, at=now)
+    repo.record_heartbeat(org, warning, at=now + timedelta(seconds=1))
+
+    incidents = repo.list_incidents(org)
+    assert len(incidents) == 1
+    assert incidents[0].status == "OPEN"
+    assert incidents[0].severity == "HIGH"
+    assert incidents[0].current_risk_score == 67
+    _, events, *_ = repo.get_incident_detail(org, incidents[0].id)
+    assert [event.event_type for event in events] == ["incident_opened", "state_changed"]
+
+
+def test_secure_heartbeat_does_not_create_incident(repo: SaaSRepository) -> None:
+    org, workspace, device, session = make_endpoint(repo)
+    now = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    repo.record_heartbeat(org, HeartbeatInput(session, workspace, device, None, "SECURE", True, True, True, 25, 8, None, "test"), at=now)
+    assert repo.list_incidents(org) == []
+
+
+def test_incident_escalation_and_resolution(repo: SaaSRepository) -> None:
+    org, workspace, device, session = make_endpoint(repo)
+    now = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    repo.record_heartbeat(org, HeartbeatInput(session, workspace, device, None, "WARNING", True, True, True, 25, 67, now, "test"), at=now)
+    repo.record_heartbeat(org, HeartbeatInput(session, workspace, device, None, "LOCKDOWN", True, True, True, 30, 91, now, "test"), at=now + timedelta(seconds=2))
+    incident = repo.list_incidents(org)[0]
+    assert incident.state == "LOCKDOWN"
+    assert incident.peak_risk_score == 91
+    assert incident.severity == "CRITICAL"
+
+    repo.record_heartbeat(org, HeartbeatInput(session, workspace, device, None, "SECURE", True, True, True, 20, 12, None, "test"), at=now + timedelta(seconds=5))
+    closed = repo.list_incidents(org)[0]
+    assert closed.ended_at is not None
+    assert closed.status == "RESOLVED"
+    assert closed.duration_ms == 5000
+    _, events, *_ = repo.get_incident_detail(org, closed.id)
+    assert [event.event_type for event in events] == ["incident_opened", "state_changed", "state_changed", "risk_score_changed", "threat_cleared"]
+
+
+def test_incident_status_false_positive_and_notes(repo: SaaSRepository) -> None:
+    org, workspace, device, session = make_endpoint(repo)
+    incident = repo.create_incident(org, workspace, device, session, "PHONE", "HIGH", 72)
+    updated = repo.update_incident_status(org, incident.id, "FALSE_POSITIVE", reason="Analyst reviewed metadata.", analyst_id="analyst-1")
+    note = repo.add_analyst_note(org, incident.id, "Bounding box matched a desk phone.", analyst_id="analyst-1")
+
+    assert updated.status == "FALSE_POSITIVE"
+    assert updated.resolution_reason == "Analyst reviewed metadata."
+    assert note.note == "Bounding box matched a desk phone."
+    _, events, _, _, notes = repo.get_incident_detail(org, incident.id)
+    assert events[-2].event_type == "status_changed"
+    assert events[-1].event_type == "analyst_note_added"
+    assert notes[0].analyst_id == "analyst-1"
+
+
+def test_incident_filters_pagination_and_tenant_isolation(repo: SaaSRepository) -> None:
+    org, workspace, device, session = make_endpoint(repo)
+    other_org, other_workspace, other_device, other_session = make_endpoint(repo, "other-filter")
+    repo.create_incident(org, workspace, device, session, "PHONE", "HIGH", 72)
+    repo.create_incident(org, workspace, device, session, "OBSERVER", "LOW", 12)
+    other_incident = repo.create_incident(other_org, other_workspace, other_device, other_session, "PHONE", "CRITICAL", 95)
+
+    assert repo.count_incidents(org) == 2
+    assert [item.threat_type for item in repo.list_incidents(org, severity="HIGH")] == ["PHONE"]
+    assert len(repo.list_incidents(org, limit=1, offset=0)) == 1
+    assert all(item.organization_id == org for item in repo.list_incidents(org))
+
+    with pytest.raises(TenantAccessError):
+        repo.get_incident_detail(org, other_incident.id)

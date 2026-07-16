@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildHeartbeatPayload, buildOverviewMetrics, formatReported, hasRandomLookingData, healthTone, riskLabel } from './adminModel'
+import { buildHeartbeatPayload, buildOverviewMetrics, formatReported, hasRandomIncidentData, hasRandomLookingData, healthTone, riskLabel } from './adminModel'
 import { getRuntimeConfig } from './config'
 
 describe('admin console view models', () => {
@@ -96,6 +96,33 @@ describe('admin console view models', () => {
       last_detection_at: null,
       last_heartbeat_at: null,
       application_version: 'test',
+    }])).toBe(false)
+  })
+
+  it('does not classify real persisted incident metadata as random sample data', () => {
+    expect(hasRandomIncidentData([{
+      id: 'incident-001',
+      organization_id: 'org',
+      workspace_id: 'finance-workspace',
+      device_id: 'aalim-laptop',
+      session_id: 'session-1',
+      state: 'WARNING',
+      status: 'OPEN',
+      severity: 'HIGH',
+      threat_type: 'OPTICAL_THREAT',
+      started_at: '2026-07-16T00:00:00Z',
+      ended_at: null,
+      duration_ms: null,
+      peak_risk_score: 67,
+      current_risk_score: 67,
+      phone_confidence: null,
+      face_count: null,
+      backend_connected: true,
+      model_loaded: true,
+      assigned_analyst_id: null,
+      resolution_reason: null,
+      created_at: '2026-07-16T00:00:00Z',
+      updated_at: '2026-07-16T00:00:00Z',
     }])).toBe(false)
   })
 })

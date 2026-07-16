@@ -43,6 +43,13 @@ class IncidentStatus(StrEnum):
     DISMISSED = "DISMISSED"
 
 
+class IncidentSeverity(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
 class EvidenceMode(StrEnum):
     METADATA_ONLY = "Metadata Only"
     BLURRED_EVIDENCE = "Blurred Evidence"
@@ -157,9 +164,16 @@ class ThreatIncident(TenantMixin, Base):
     workspace_id: Mapped[str] = mapped_column(String(64), nullable=False)
     device_id: Mapped[str] = mapped_column(String(64), nullable=False)
     session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), default="WARNING", nullable=False)
     threat_type: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(32), nullable=False)
     peak_risk_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    current_risk_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    detection_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    phone_confidence: Mapped[float | None] = mapped_column(Float)
+    face_count: Mapped[int | None] = mapped_column(Integer)
+    backend_connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    model_loaded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default=IncidentStatus.OPEN.value, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -168,6 +182,9 @@ class ThreatIncident(TenantMixin, Base):
     actions_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     analyst_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     assigned_analyst_id: Mapped[str | None] = mapped_column(String(64))
+    resolution_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class IncidentEvent(TenantMixin, Base):
@@ -176,10 +193,27 @@ class IncidentEvent(TenantMixin, Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
     incident_id: Mapped[str] = mapped_column(String(64), ForeignKey("threat_incidents.id"), nullable=False)
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    source: Mapped[str] = mapped_column(String(80), default="system", nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     risk_score: Mapped[int | None] = mapped_column(Integer)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    frame_id: Mapped[int | None] = mapped_column(Integer)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class IncidentSignal(TenantMixin, Base):
+    __tablename__ = "incident_signals"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    incident_id: Mapped[str] = mapped_column(String(64), ForeignKey("threat_incidents.id"), nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    frame_id: Mapped[int | None] = mapped_column(Integer)
+    bbox_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    frame_hash: Mapped[str | None] = mapped_column(String(128))
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class RemediationAction(TenantMixin, Base):
@@ -190,6 +224,16 @@ class RemediationAction(TenantMixin, Base):
     action_type: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
     requested_by_user_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class AnalystNote(TenantMixin, Base):
+    __tablename__ = "analyst_notes"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    incident_id: Mapped[str] = mapped_column(String(64), ForeignKey("threat_incidents.id"), nullable=False)
+    analyst_id: Mapped[str | None] = mapped_column(String(64))
+    note: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

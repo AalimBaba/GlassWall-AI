@@ -12,6 +12,7 @@ import type { DeviceInventoryItem, EndpointHealth } from './api/types'
 import { useAdminOverview } from './hooks/useAdminOverview'
 import { useDevices } from './hooks/useDevices'
 import { useEndpointHeartbeat } from './hooks/useEndpointHeartbeat'
+import { useIncidents } from './hooks/useIncidents'
 import { LatestFrameQueue } from './pipeline/LatestFrameQueue'
 import { PhoneInferenceWorker } from './pipeline/PhoneInferenceWorker'
 import { PipelineMetrics } from './pipeline/PipelineMetrics'
@@ -141,6 +142,7 @@ export default function App() {
   const backendUrl = runtimeConfig.backendWsUrl
   const adminOverview = useAdminOverview(runtimeConfig)
   const deviceInventory = useDevices(runtimeConfig)
+  const incidents = useIncidents(runtimeConfig)
   const currentSessionState = active?.mode === 'Lockdown' ? 'LOCKDOWN' : active?.mode === 'Warning' ? 'WARNING' : cameraState === 'error' ? 'MONITORING_INTERRUPTED' : 'SECURE'
   const latestRiskScore = active?.mode === 'Lockdown' ? Math.max(80, active.confidence) : active?.mode === 'Warning' ? Math.max(60, active.confidence) : Math.min(29, Math.round(Math.max(0, phoneSnapshot.confidence) * 100))
   const heartbeatStatus = useEndpointHeartbeat(runtimeConfig, {
@@ -492,7 +494,8 @@ export default function App() {
 
       {appView === 'overview' && <AdminOverviewSurface overview={adminOverview.data} devices={deviceInventory.devices} loading={adminOverview.loading || deviceInventory.loading} error={adminOverview.error || deviceInventory.error} lastUpdatedAt={adminOverview.lastUpdatedAt || deviceInventory.lastUpdatedAt} configReady={runtimeConfig.controlPlaneConfigured} onRefresh={() => { void adminOverview.refresh(); void deviceInventory.refresh() }} onOpenEndpoint={() => setAppView('endpoint')} onOpenDevices={() => setAppView('devices')} />}
       {appView === 'devices' && <DevicesSurface devices={deviceInventory.devices} loading={deviceInventory.loading} error={deviceInventory.error} lastUpdatedAt={deviceInventory.lastUpdatedAt} configReady={runtimeConfig.controlPlaneConfigured} organizationId={runtimeConfig.organizationId} selectedDevice={selectedDevice} onSelectDevice={setSelectedDevice} onRefresh={() => void deviceInventory.refresh()} onOpenEndpoint={() => setAppView('endpoint')} />}
-      {['incidents', 'policies', 'analytics', 'settings'].includes(appView) && <PlaceholderSurface view={appView} onOpenEndpoint={() => setAppView('endpoint')} />}
+      {appView === 'incidents' && <IncidentsSurface incidents={incidents} configReady={runtimeConfig.controlPlaneConfigured} organizationId={runtimeConfig.organizationId} onOpenEndpoint={() => setAppView('endpoint')} />}
+      {['policies', 'analytics', 'settings'].includes(appView) && <PlaceholderSurface view={appView} onOpenEndpoint={() => setAppView('endpoint')} />}
 
       {appView === 'endpoint' && <section className="section shell" id="demo">
         <SectionHead kicker="INTERACTIVE PROTOTYPE" title="Put the dashboard under pressure." text="Choose an explicit simulation or opt in to experimental, browser-side object detection. Nothing triggers automatically at startup." />
@@ -649,6 +652,43 @@ function ControlPlaneEmpty({ onOpenEndpoint, onRefresh }: { onOpenEndpoint: () =
 
 function EmptyEndpoints({ onOpenEndpoint, onRefresh }: { onOpenEndpoint: () => void; onRefresh: () => void }) {
   return <div className="admin-empty"><Users/><div><b>No endpoints registered</b><span>Start the Endpoint Protection client with the control-plane backend configured. Registered devices and live security posture will appear here.</span></div><div><button onClick={onOpenEndpoint}>Open Endpoint Protection</button><button onClick={() => document.getElementById('technology')?.scrollIntoView({ behavior: 'smooth' })}>View Local Setup</button><button onClick={onRefresh}>Refresh</button></div></div>
+}
+
+function IncidentsSurface({ incidents, configReady, organizationId, onOpenEndpoint }: { incidents: ReturnType<typeof useIncidents>; configReady: boolean; organizationId: string; onOpenEndpoint: () => void }) {
+  const counts = incidents.incidents.reduce((acc, item) => ({ ...acc, [item.status]: (acc[item.status] || 0) + 1 }), {} as Record<string, number>)
+  return <section className="section shell admin-surface">
+    <div className="admin-head"><div><div className="kicker">INCIDENT MANAGEMENT</div><h2>Threat investigation workflow</h2><p>Incidents are created from confirmed endpoint state transitions and stored timeline events. This page does not generate sample alerts.</p></div><div className="admin-actions"><span>Last updated: {formatTime(incidents.lastUpdatedAt)}</span><button onClick={() => void incidents.refresh()}><RefreshCw/> Refresh</button></div></div>
+    {!configReady && <ControlPlaneEmpty onOpenEndpoint={onOpenEndpoint} onRefresh={() => void incidents.refresh()}/>}
+    {configReady && incidents.error && <div className="admin-error"><TriangleAlert/><div><b>Unable to load incidents</b><span>{incidents.error}</span></div><button onClick={() => void incidents.refresh()}>Retry</button></div>}
+    {configReady && <div className="incident-toolbar"><input aria-label="Search incidents" value={incidents.search} onChange={event => incidents.setSearch(event.target.value)} placeholder="Search device, workspace, threat type…"/><select aria-label="Filter status" value={incidents.statusFilter} onChange={event => incidents.setStatusFilter(event.target.value as never)}><option value="">All statuses</option><option value="OPEN">Open</option><option value="INVESTIGATING">Investigating</option><option value="RESOLVED">Resolved</option><option value="FALSE_POSITIVE">False positive</option><option value="DISMISSED">Dismissed</option></select><select aria-label="Filter severity" value={incidents.severityFilter} onChange={event => incidents.setSeverityFilter(event.target.value as never)}><option value="">All severities</option><option value="LOW">Low</option><option value="MEDIUM">Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></div>}
+    {configReady && <div className="admin-metrics incident-counts">{['OPEN', 'INVESTIGATING', 'RESOLVED', 'FALSE_POSITIVE'].map(status => <div className={`admin-metric ${status === 'OPEN' || status === 'INVESTIGATING' ? 'warning' : 'secure'}`} key={status}><span>{status.replace('_', ' ')}</span><b>{incidents.loading ? '…' : counts[status] || 0}</b></div>)}</div>}
+    {configReady && !incidents.loading && incidents.incidents.length === 0 && <div className="admin-empty"><ShieldCheck/><div><b>No incidents recorded</b><span>Confirmed Warning or Lockdown transitions from registered endpoints will appear here with real timeline events and metadata-only evidence.</span></div><div><button onClick={onOpenEndpoint}>Open Endpoint Protection</button><button onClick={() => void incidents.refresh()}>Refresh</button></div></div>}
+    {configReady && incidents.incidents.length > 0 && <div className="device-table-wrap incident-table-wrap"><table className="device-table"><thead><tr><th>Incident</th><th>Severity</th><th>Status</th><th>Device</th><th>Workspace</th><th>Threat Type</th><th>Peak Risk</th><th>Started</th><th>Duration</th><th>Assigned</th><th>Actions</th></tr></thead><tbody>{incidents.incidents.map(incident => <tr key={incident.id}><td><b>{incident.id}</b><small>{incident.state}</small></td><td><SeverityBadge value={incident.severity}/></td><td><StatusBadge value={incident.status}/></td><td>{incident.device_id}</td><td>{incident.workspace_id}</td><td>{incident.threat_type}</td><td><b>{incident.peak_risk_score}</b><small>{riskLabel(incident.peak_risk_score)}</small></td><td>{formatTime(incident.started_at)}</td><td>{formatDuration(incident.duration_ms)}</td><td>{formatReported(incident.assigned_analyst_id)}</td><td><div className="row-actions"><button onClick={() => void incidents.openIncident(incident)}>Investigate</button><button onClick={() => void incidents.refresh()}>Refresh</button></div></td></tr>)}</tbody></table></div>}
+    {incidents.selected && <IncidentDrawer incident={incidents.selected} loading={incidents.detailLoading} onClose={incidents.closeIncident} onStatus={status => void incidents.updateStatus(status)} onAddNote={note => void incidents.addNote(note)} organizationId={organizationId}/>}
+  </section>
+}
+
+function SeverityBadge({ value }: { value: string }) {
+  const tone = value === 'CRITICAL' || value === 'HIGH' ? 'danger' : value === 'MEDIUM' ? 'warning' : 'secure'
+  return <span className={`status-badge ${tone}`}>{value}</span>
+}
+
+function formatDuration(ms: number | null | undefined) {
+  if (ms === null || ms === undefined) return 'Active'
+  if (ms < 1000) return `${ms} ms`
+  return `${Math.round(ms / 100) / 10}s`
+}
+
+function IncidentDrawer({ incident, loading, onClose, onStatus, onAddNote, organizationId }: { incident: NonNullable<ReturnType<typeof useIncidents>['selected']>; loading: boolean; onClose: () => void; onStatus: (status: 'INVESTIGATING' | 'RESOLVED' | 'FALSE_POSITIVE' | 'DISMISSED') => void; onAddNote: (note: string) => void; organizationId: string }) {
+  const [note, setNote] = useState('')
+  return <div className="drawer-backdrop" role="dialog" aria-modal="true"><aside className="device-drawer incident-drawer"><div className="drawer-head"><div><span>INCIDENT INVESTIGATION</span><h3>{incident.threat_type} · {incident.severity}</h3></div><button onClick={onClose} aria-label="Close incident details"><X/></button></div>
+    <div className="detail-grid">{[
+      ['Incident ID', incident.id], ['Organization', organizationId], ['Affected device', incident.device_id], ['Workspace', incident.workspace_id], ['Status', incident.status], ['State', incident.state], ['Current risk', incident.current_risk_score], ['Peak risk', incident.peak_risk_score], ['Backend health', formatReported(incident.backend_connected)], ['Phone model', formatReported(incident.model_loaded)], ['Started', formatTime(incident.started_at)], ['Duration', formatDuration(incident.duration_ms)]
+    ].map(([label, value]) => <div key={label}><span>{label}</span><b>{formatReported(value)}</b></div>)}</div>
+    <div className="incident-actions"><button disabled={loading} onClick={() => onStatus('INVESTIGATING')}>Investigating</button><button disabled={loading} onClick={() => onStatus('RESOLVED')}>Resolve</button><button disabled={loading} onClick={() => onStatus('FALSE_POSITIVE')}>False positive</button><button disabled={loading} onClick={() => onStatus('DISMISSED')}>Dismiss</button></div>
+    <div className="timeline-panel"><b>Chronological timeline</b>{incident.events.length === 0 ? <span>No timeline events recorded for this incident.</span> : incident.events.map(event => <div className="timeline-event" key={event.id}><time>{formatTime(event.occurred_at)}</time><div><b>{event.event_type.replaceAll('_', ' ')}</b><span>{event.message}</span><small>{event.source} · Risk {formatReported(event.risk_score)}{event.frame_id ? ` · Frame ${event.frame_id}` : ''}</small></div></div>)}</div>
+    <div className="timeline-panel"><b>Analyst notes</b>{incident.analyst_notes.length === 0 ? <span>No analyst notes yet.</span> : incident.analyst_notes.map(item => <div className="timeline-event" key={item.id}><time>{formatTime(item.created_at)}</time><div><b>{item.analyst_id || 'Analyst'}</b><span>{item.note}</span></div></div>)}<form onSubmit={event => { event.preventDefault(); onAddNote(note); setNote('') }}><input value={note} onChange={event => setNote(event.target.value)} placeholder="Add metadata-only analyst note…"/><button disabled={loading || !note.trim()}>Add note</button></form></div>
+  </aside></div>
 }
 
 function PlaceholderSurface({ view, onOpenEndpoint }: { view: AppView; onOpenEndpoint: () => void }) {

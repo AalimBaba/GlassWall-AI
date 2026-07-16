@@ -65,3 +65,65 @@ def test_invalid_organization_returns_safe_404() -> None:
     client = TestClient(main.app)
     response = client.get("/api/organizations/not-real/admin/overview")
     assert response.status_code == 404
+
+
+def test_incident_api_lists_filters_details_status_and_notes() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    repo = SaaSRepository(engine=engine)
+    repo.create_schema()
+    main.saas_repo = repo
+
+    org = repo.create_organization("Incident Tenant", "incident-tenant")
+    workspace = repo.create_workspace(org.id, "Trading Desk")
+    device = repo.create_device(org.id, "Analyst Workstation", "incident-device")
+    endpoint = repo.create_endpoint_session(org.id, workspace.id, device.id)
+    incident = repo.create_incident(org.id, workspace.id, device.id, endpoint.id, "PHONE", "HIGH", 77)
+    repo.add_incident_event(org.id, incident.id, "phone_persisted", "Phone persisted beyond temporal threshold.", 77)
+
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    listed = client.get(f"/api/organizations/{org.id}/incidents", params={"severity": "HIGH", "limit": 10, "offset": 0})
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["incidents"][0]["id"] == incident.id
+    assert listed.json()["sample_data"] is False
+
+    detail = client.get(f"/api/organizations/{org.id}/incidents/{incident.id}")
+    assert detail.status_code == 200
+    assert [event["event_type"] for event in detail.json()["events"]] == ["phone_persisted"]
+
+    status = client.post(
+        f"/api/organizations/{org.id}/incidents/{incident.id}/status",
+        json={"status": "INVESTIGATING", "reason": "Assigned for review", "analyst_id": "analyst-1"},
+    )
+    assert status.status_code == 200
+    assert status.json()["status"] == "INVESTIGATING"
+    assert status.json()["assigned_analyst_id"] == "analyst-1"
+
+    note = client.post(
+        f"/api/organizations/{org.id}/incidents/{incident.id}/notes",
+        json={"note": "Reviewing metadata only.", "analyst_id": "analyst-1"},
+    )
+    assert note.status_code == 200
+    assert note.json()["analyst_notes"][0]["note"] == "Reviewing metadata only."
+
+
+def test_incident_api_enforces_tenant_isolation() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    repo = SaaSRepository(engine=engine)
+    repo.create_schema()
+    main.saas_repo = repo
+
+    org_a = repo.create_organization("A", "a")
+    workspace_a = repo.create_workspace(org_a.id, "A Workspace")
+    device_a = repo.create_device(org_a.id, "A Device", "a-device")
+    session_a = repo.create_endpoint_session(org_a.id, workspace_a.id, device_a.id)
+    incident = repo.create_incident(org_a.id, workspace_a.id, device_a.id, session_a.id, "PHONE", "HIGH", 72)
+    org_b = repo.create_organization("B", "b")
+
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    response = client.get(f"/api/organizations/{org_b.id}/incidents/{incident.id}")
+    assert response.status_code == 404

@@ -6,15 +6,30 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 import logging
 from contextlib import asynccontextmanager
+import json
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import load_settings
 from .detector import FrameDetector, InvalidFrameError
 from .logging_config import configure_logging
 from .saas_repository import HeartbeatInput, SaaSRepository, TenantAccessError
-from .schemas import AdminOverviewResponse, DeviceInventoryResponse, EndpointHeartbeatRequest, EndpointHealthResponse
+from .schemas import (
+    AdminOverviewResponse,
+    AnalystNoteRequest,
+    AnalystNoteResponse,
+    DeviceInventoryResponse,
+    EndpointHeartbeatRequest,
+    EndpointHealthResponse,
+    IncidentEventResponse,
+    IncidentListResponse,
+    IncidentSignalResponse,
+    IncidentStatusUpdateRequest,
+    RemediationActionResponse,
+    ThreatIncidentDetailResponse,
+    ThreatIncidentSummaryResponse,
+)
 from .threat_engine import TemporalThreatEngine
 
 settings = load_settings()
@@ -102,6 +117,88 @@ def _timestamp_to_datetime(timestamp: int | None) -> datetime | None:
     return datetime.fromtimestamp(timestamp / 1000, timezone.utc)
 
 
+def _json(value: str, fallback):
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return fallback
+
+
+def _incident_summary(incident) -> ThreatIncidentSummaryResponse:
+    return ThreatIncidentSummaryResponse(
+        id=incident.id,
+        organization_id=incident.organization_id,
+        workspace_id=incident.workspace_id,
+        device_id=incident.device_id,
+        session_id=incident.session_id,
+        state=incident.state,
+        status=incident.status,
+        severity=incident.severity,
+        threat_type=incident.threat_type,
+        started_at=incident.started_at.isoformat(),
+        ended_at=incident.ended_at.isoformat() if incident.ended_at else None,
+        duration_ms=incident.duration_ms,
+        peak_risk_score=incident.peak_risk_score,
+        current_risk_score=incident.current_risk_score,
+        phone_confidence=incident.phone_confidence,
+        face_count=incident.face_count,
+        backend_connected=incident.backend_connected,
+        model_loaded=incident.model_loaded,
+        assigned_analyst_id=incident.assigned_analyst_id,
+        resolution_reason=incident.resolution_reason,
+        created_at=incident.created_at.isoformat(),
+        updated_at=incident.updated_at.isoformat(),
+    )
+
+
+def _incident_detail(incident, events, signals, actions, notes) -> ThreatIncidentDetailResponse:
+    summary = _incident_summary(incident).model_dump()
+    return ThreatIncidentDetailResponse(
+        **summary,
+        events=[
+            IncidentEventResponse(
+                id=event.id,
+                event_type=event.event_type,
+                source=event.source,
+                message=event.message,
+                risk_score=event.risk_score,
+                confidence=event.confidence,
+                frame_id=event.frame_id,
+                metadata=_json(event.metadata_json, {}),
+                occurred_at=event.occurred_at.isoformat(),
+            )
+            for event in events
+        ],
+        signals=[
+            IncidentSignalResponse(
+                id=signal.id,
+                signal_type=signal.signal_type,
+                confidence=signal.confidence,
+                frame_id=signal.frame_id,
+                bbox=_json(signal.bbox_json, []),
+                frame_hash=signal.frame_hash,
+                metadata=_json(signal.metadata_json, {}),
+                observed_at=signal.observed_at.isoformat(),
+            )
+            for signal in signals
+        ],
+        remediation_actions=[
+            RemediationActionResponse(
+                id=action.id,
+                action_type=action.action_type,
+                status=action.status,
+                requested_by_user_id=action.requested_by_user_id,
+                created_at=action.created_at.isoformat(),
+            )
+            for action in actions
+        ],
+        analyst_notes=[
+            AnalystNoteResponse(id=note.id, analyst_id=note.analyst_id, note=note.note, created_at=note.created_at.isoformat())
+            for note in notes
+        ],
+    )
+
+
 @app.post("/api/organizations/{organization_id}/heartbeats", response_model=EndpointHealthResponse)
 def record_endpoint_heartbeat(organization_id: str, payload: EndpointHeartbeatRequest) -> EndpointHealthResponse:
     try:
@@ -186,6 +283,86 @@ def device_inventory(organization_id: str) -> DeviceInventoryResponse:
             for snapshot in snapshots
         ],
     )
+
+
+@app.get("/api/organizations/{organization_id}/incidents", response_model=IncidentListResponse)
+def list_incidents(
+    organization_id: str,
+    status: str | None = None,
+    severity: str | None = None,
+    device: str | None = None,
+    workspace: str | None = None,
+    threat_type: str | None = None,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> IncidentListResponse:
+    try:
+        incidents = saas_repo.list_incidents(
+            organization_id,
+            status=status,
+            severity=severity,
+            device_id=device,
+            workspace_id=workspace,
+            threat_type=threat_type,
+            limit=limit,
+            offset=offset,
+        )
+        total = saas_repo.count_incidents(
+            organization_id,
+            status=status,
+            severity=severity,
+            device_id=device,
+            workspace_id=workspace,
+            threat_type=threat_type,
+        )
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return IncidentListResponse(
+        organization_id=organization_id,
+        incidents=[_incident_summary(item) for item in incidents],
+        total=total,
+        limit=limit,
+        offset=offset,
+        sample_data=False,
+    )
+
+
+@app.get("/api/organizations/{organization_id}/incidents/{incident_id}", response_model=ThreatIncidentDetailResponse)
+def get_incident(organization_id: str, incident_id: str) -> ThreatIncidentDetailResponse:
+    try:
+        return _incident_detail(*saas_repo.get_incident_detail(organization_id, incident_id))
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/organizations/{organization_id}/incidents/{incident_id}/status", response_model=ThreatIncidentDetailResponse)
+def update_incident_status(organization_id: str, incident_id: str, payload: IncidentStatusUpdateRequest) -> ThreatIncidentDetailResponse:
+    try:
+        saas_repo.update_incident_status(organization_id, incident_id, payload.status, payload.reason, payload.analyst_id)
+        return _incident_detail(*saas_repo.get_incident_detail(organization_id, incident_id))
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/organizations/{organization_id}/incidents/{incident_id}/notes", response_model=ThreatIncidentDetailResponse)
+def add_incident_note(organization_id: str, incident_id: str, payload: AnalystNoteRequest) -> ThreatIncidentDetailResponse:
+    try:
+        saas_repo.add_analyst_note(organization_id, incident_id, payload.note, payload.analyst_id)
+        return _incident_detail(*saas_repo.get_incident_detail(organization_id, incident_id))
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.websocket("/ws/analyze")

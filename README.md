@@ -165,10 +165,30 @@ The React frontend now has separate product surfaces for **Overview**, **Endpoin
 - Overview cards show total devices, online/degraded/offline devices, secure/warning/lockdown sessions, and open incidents from `GET /api/organizations/{organization_id}/admin/overview`.
 - Devices shows endpoint inventory from `GET /api/organizations/{organization_id}/devices`.
 - Device details show the stored organization, workspace, endpoint/session IDs, health, risk score, component status, inference latency, heartbeat time, and latest detection time.
+- Incidents shows tenant-scoped incident counts, filters, persisted incident rows, and a metadata-only investigation drawer backed by `GET /api/organizations/{organization_id}/incidents`.
 - Empty-state and backend-unconfigured screens are shown when there is no real control-plane data.
-- Incidents, Policies, Analytics, and Settings are intentionally labeled as not yet configured; no fake live activity is generated.
+- Policies, Analytics, and Settings are intentionally labeled as not yet configured; no fake live activity is generated.
 
 Endpoint Protection sends heartbeats only when a control-plane backend and endpoint identity are configured. Heartbeats include real browser/client values: session state, camera permission, phone-model readiness, backend connectivity, latest risk score, latest detection timestamp, inference latency, and application version. Heartbeat failures never stop browser-side phone detection.
+
+Real incident persistence:
+
+- WARNING or LOCKDOWN endpoint state opens a single active incident for the current threat window.
+- Repeated heartbeats update the same active incident rather than creating one incident per frame or per heartbeat.
+- LOCKDOWN escalation updates state, severity, current risk, peak risk, and timeline events.
+- Returning to SECURE closes the active incident as resolved with a system recovery reason.
+- Analyst actions can move incidents to INVESTIGATING, RESOLVED, FALSE_POSITIVE, or DISMISSED.
+- Analyst notes are stored separately from timeline events.
+- Evidence remains metadata-only by default; raw webcam frames are not persisted.
+
+Incident APIs:
+
+```text
+GET  /api/organizations/{organization_id}/incidents
+GET  /api/organizations/{organization_id}/incidents/{incident_id}
+POST /api/organizations/{organization_id}/incidents/{incident_id}/status
+POST /api/organizations/{organization_id}/incidents/{incident_id}/notes
+```
 
 ```text
 Endpoint Protection Client

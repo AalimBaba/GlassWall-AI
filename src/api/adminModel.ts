@@ -1,4 +1,4 @@
-import type { AdminOverview, DeviceInventoryItem, EndpointHeartbeatPayload, EndpointHealth } from './types'
+import type { AdminOverview, DeviceInventoryItem, EndpointHeartbeatPayload, EndpointHealth, IncidentSummary } from './types'
 
 export type AdminMetric = { label: string; value: number; tone: 'secure' | 'warning' | 'danger' | 'neutral' }
 
@@ -69,4 +69,8 @@ export function buildHeartbeatPayload(input: {
 
 export function hasRandomLookingData(devices: DeviceInventoryItem[]) {
   return devices.some(item => /random|fake|lorem/i.test(`${item.device_name} ${item.workspace_name}`))
+}
+
+export function hasRandomIncidentData(incidents: IncidentSummary[]) {
+  return incidents.some(item => /random|fake|lorem|sample/i.test(`${item.id} ${item.device_id} ${item.workspace_id} ${item.threat_type}`))
 }
