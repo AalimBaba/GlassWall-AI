@@ -168,3 +168,51 @@ class IncidentStatusUpdateRequest(BaseModel):
 class AnalystNoteRequest(BaseModel):
     note: str = Field(min_length=1, max_length=4000)
     analyst_id: str | None = None
+
+
+class ProtectedZoneRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    description: str = ""
+    relative_x: float = Field(ge=0.0, le=1.0)
+    relative_y: float = Field(ge=0.0, le=1.0)
+    relative_width: float = Field(gt=0.0, le=1.0)
+    relative_height: float = Field(gt=0.0, le=1.0)
+    sensitivity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "HIGH"
+    protection_action: Literal["BLUR", "REDACT", "HIDE", "WATERMARK"] = "BLUR"
+    enabled: bool = True
+
+
+class ProtectedZonePatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=180)
+    description: str | None = None
+    relative_x: float | None = Field(default=None, ge=0.0, le=1.0)
+    relative_y: float | None = Field(default=None, ge=0.0, le=1.0)
+    relative_width: float | None = Field(default=None, gt=0.0, le=1.0)
+    relative_height: float | None = Field(default=None, gt=0.0, le=1.0)
+    sensitivity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None
+    protection_action: Literal["BLUR", "REDACT", "HIDE", "WATERMARK"] | None = None
+    enabled: bool | None = None
+
+
+class ProtectedZoneResponse(BaseModel):
+    id: str
+    organization_id: str
+    workspace_id: str
+    name: str
+    description: str
+    relative_x: float
+    relative_y: float
+    relative_width: float
+    relative_height: float
+    sensitivity: str
+    protection_action: str
+    enabled: bool
+    created_at: str
+    updated_at: str
+
+
+class ProtectedZoneListResponse(BaseModel):
+    organization_id: str
+    workspace_id: str
+    zones: list[ProtectedZoneResponse]
+    sample_data: bool = False

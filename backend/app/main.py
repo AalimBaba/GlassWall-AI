@@ -26,6 +26,10 @@ from .schemas import (
     IncidentListResponse,
     IncidentSignalResponse,
     IncidentStatusUpdateRequest,
+    ProtectedZoneListResponse,
+    ProtectedZonePatchRequest,
+    ProtectedZoneRequest,
+    ProtectedZoneResponse,
     RemediationActionResponse,
     ThreatIncidentDetailResponse,
     ThreatIncidentSummaryResponse,
@@ -51,7 +55,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -196,6 +200,25 @@ def _incident_detail(incident, events, signals, actions, notes) -> ThreatInciden
             AnalystNoteResponse(id=note.id, analyst_id=note.analyst_id, note=note.note, created_at=note.created_at.isoformat())
             for note in notes
         ],
+    )
+
+
+def _zone_response(zone) -> ProtectedZoneResponse:
+    return ProtectedZoneResponse(
+        id=zone.id,
+        organization_id=zone.organization_id,
+        workspace_id=zone.workspace_id,
+        name=zone.name,
+        description=zone.description,
+        relative_x=zone.relative_x,
+        relative_y=zone.relative_y,
+        relative_width=zone.relative_width,
+        relative_height=zone.relative_height,
+        sensitivity=zone.sensitivity,
+        protection_action=zone.protection_action,
+        enabled=zone.enabled,
+        created_at=zone.created_at.isoformat(),
+        updated_at=zone.updated_at.isoformat(),
     )
 
 
@@ -363,6 +386,75 @@ def add_incident_note(organization_id: str, incident_id: str, payload: AnalystNo
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/organizations/{organization_id}/workspaces/{workspace_id}/zones", response_model=ProtectedZoneListResponse)
+def list_protected_zones(organization_id: str, workspace_id: str) -> ProtectedZoneListResponse:
+    try:
+        zones = saas_repo.list_protected_zones(organization_id, workspace_id)
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ProtectedZoneListResponse(
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        zones=[_zone_response(zone) for zone in zones],
+        sample_data=False,
+    )
+
+
+@app.post("/api/organizations/{organization_id}/workspaces/{workspace_id}/zones", response_model=ProtectedZoneResponse)
+def create_protected_zone(organization_id: str, workspace_id: str, payload: ProtectedZoneRequest) -> ProtectedZoneResponse:
+    try:
+        zone = saas_repo.add_protected_zone(
+            organization_id,
+            workspace_id,
+            name=payload.name,
+            description=payload.description,
+            relative_x=payload.relative_x,
+            relative_y=payload.relative_y,
+            relative_width=payload.relative_width,
+            relative_height=payload.relative_height,
+            sensitivity=payload.sensitivity,
+            protection_action=payload.protection_action,
+            enabled=payload.enabled,
+        )
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _zone_response(zone)
+
+
+@app.patch("/api/organizations/{organization_id}/workspaces/{workspace_id}/zones/{zone_id}", response_model=ProtectedZoneResponse)
+def update_protected_zone(organization_id: str, workspace_id: str, zone_id: str, payload: ProtectedZonePatchRequest) -> ProtectedZoneResponse:
+    try:
+        zone = saas_repo.update_protected_zone(organization_id, workspace_id, zone_id, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _zone_response(zone)
+
+
+@app.delete("/api/organizations/{organization_id}/workspaces/{workspace_id}/zones/{zone_id}")
+def delete_protected_zone(organization_id: str, workspace_id: str, zone_id: str) -> dict[str, object]:
+    try:
+        saas_repo.delete_protected_zone(organization_id, workspace_id, zone_id)
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"deleted": True, "zone_id": zone_id}
 
 
 @app.websocket("/ws/analyze")

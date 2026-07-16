@@ -190,6 +190,48 @@ POST /api/organizations/{organization_id}/incidents/{incident_id}/status
 POST /api/organizations/{organization_id}/incidents/{incident_id}/notes
 ```
 
+## Protected workspace zones
+
+GlassWall AI now supports tenant-scoped protected zones for selectively obscuring sensitive dashboard regions. Zones are stored with normalized coordinates so they stay aligned as the protected workspace resizes:
+
+```text
+relative_x, relative_y, relative_width, relative_height
+0.0 <= coordinate <= 1.0
+```
+
+Each zone belongs to one organization and workspace, and tenant checks are enforced for list/create/update/delete operations. A zone includes a name, description, sensitivity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), protection action (`BLUR`, `REDACT`, `HIDE`, `WATERMARK`), and enabled flag.
+
+Zone APIs:
+
+```text
+GET    /api/organizations/{organization_id}/workspaces/{workspace_id}/zones
+POST   /api/organizations/{organization_id}/workspaces/{workspace_id}/zones
+PATCH  /api/organizations/{organization_id}/workspaces/{workspace_id}/zones/{zone_id}
+DELETE /api/organizations/{organization_id}/workspaces/{workspace_id}/zones/{zone_id}
+```
+
+The Endpoint Protection surface includes a visual zone editor. On desktop/tablet, users can drag over a workspace preview to define a normalized rectangle, then name the zone, set sensitivity, choose an action, enable/disable it, save changes, or delete it. On smaller screens, zones remain viewable/editable through form controls, with precise drag editing best suited to larger displays.
+
+Initial remediation behavior:
+
+- `SECURE`: no zone obscuring.
+- `OBSERVE`: watermark-only zones are eligible for activation in the policy layer.
+- `WARNING`: enabled `HIGH` and `CRITICAL` zones apply their configured action.
+- `LOCKDOWN`: all enabled zones apply their configured action; critical blur zones are upgraded to hide.
+- `RECOVERY`: high/critical zones remain protected until recovery completes.
+- If no enabled zones exist, the previous full-dashboard Warning/Lockdown fallback remains active so the workspace is never left unprotected.
+
+```mermaid
+flowchart LR
+  State["Threat State"] --> Policy["Protection Policy"]
+  Policy --> Zones["Protected Zone Evaluation"]
+  Zones --> Blur["Blur"]
+  Zones --> Redact["Redact"]
+  Zones --> Hide["Hide"]
+  Zones --> Watermark["Watermark"]
+  Zones --> Incident["Incident Event Metadata"]
+```
+
 ```text
 Endpoint Protection Client
   → Heartbeat API

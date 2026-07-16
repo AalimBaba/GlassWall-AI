@@ -222,3 +222,50 @@ def test_incident_filters_pagination_and_tenant_isolation(repo: SaaSRepository) 
 
     with pytest.raises(TenantAccessError):
         repo.get_incident_detail(org, other_incident.id)
+
+
+def test_protected_zone_crud_and_validation(repo: SaaSRepository) -> None:
+    org, workspace, *_ = make_endpoint(repo)
+    zone = repo.add_protected_zone(
+        org,
+        workspace,
+        name="Salary column",
+        description="Sensitive compensation field",
+        relative_x=0.1,
+        relative_y=0.2,
+        relative_width=0.3,
+        relative_height=0.25,
+        sensitivity="CRITICAL",
+        protection_action="REDACT",
+    )
+    assert zone.relative_x == 0.1
+    assert zone.protection_action == "REDACT"
+    assert repo.list_protected_zones(org, workspace)[0].name == "Salary column"
+
+    updated = repo.update_protected_zone(org, workspace, zone.id, {"relative_x": 0.2, "enabled": False, "protection_action": "HIDE"})
+    assert updated.relative_x == 0.2
+    assert updated.enabled is False
+    assert updated.protection_action == "HIDE"
+
+    with pytest.raises(ValueError):
+        repo.add_protected_zone(org, workspace, "", 0.9, 0.1, 0.2, 0.2)
+    with pytest.raises(ValueError):
+        repo.update_protected_zone(org, workspace, zone.id, {"relative_width": 0})
+    with pytest.raises(ValueError):
+        repo.update_protected_zone(org, workspace, zone.id, {"relative_x": 0.9, "relative_width": 0.2})
+
+    repo.delete_protected_zone(org, workspace, zone.id)
+    assert repo.list_protected_zones(org, workspace) == []
+
+
+def test_protected_zone_tenant_and_workspace_isolation(repo: SaaSRepository) -> None:
+    org_a, workspace_a, *_ = make_endpoint(repo, "zone-a")
+    org_b, workspace_b, *_ = make_endpoint(repo, "zone-b")
+    zone = repo.add_protected_zone(org_a, workspace_a, "API key panel", 0.1, 0.1, 0.2, 0.2)
+
+    with pytest.raises(TenantAccessError):
+        repo.list_protected_zones(org_b, workspace_a)
+    with pytest.raises(TenantAccessError):
+        repo.update_protected_zone(org_b, workspace_a, zone.id, {"name": "leak"})
+    with pytest.raises(TenantAccessError):
+        repo.delete_protected_zone(org_a, workspace_b, zone.id)

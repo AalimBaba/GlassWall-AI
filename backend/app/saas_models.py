@@ -50,6 +50,20 @@ class IncidentSeverity(StrEnum):
     CRITICAL = "CRITICAL"
 
 
+class ZoneSensitivity(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+class ProtectionAction(StrEnum):
+    BLUR = "BLUR"
+    REDACT = "REDACT"
+    HIDE = "HIDE"
+    WATERMARK = "WATERMARK"
+
+
 class EvidenceMode(StrEnum):
     METADATA_ONLY = "Metadata Only"
     BLURRED_EVIDENCE = "Blurred Evidence"
@@ -135,12 +149,16 @@ class ProtectedZone(TenantMixin, Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(180), nullable=False)
-    x: Mapped[float] = mapped_column(Float, nullable=False)
-    y: Mapped[float] = mapped_column(Float, nullable=False)
-    width: Mapped[float] = mapped_column(Float, nullable=False)
-    height: Mapped[float] = mapped_column(Float, nullable=False)
-    sensitivity: Mapped[str] = mapped_column(String(32), default="standard", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    relative_x: Mapped[float] = mapped_column("x", Float, nullable=False)
+    relative_y: Mapped[float] = mapped_column("y", Float, nullable=False)
+    relative_width: Mapped[float] = mapped_column("width", Float, nullable=False)
+    relative_height: Mapped[float] = mapped_column("height", Float, nullable=False)
+    sensitivity: Mapped[str] = mapped_column(String(32), default=ZoneSensitivity.HIGH.value, nullable=False)
+    protection_action: Mapped[str] = mapped_column(String(32), default=ProtectionAction.BLUR.value, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class DetectionSignal(TenantMixin, Base):

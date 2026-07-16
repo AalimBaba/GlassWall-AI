@@ -13,6 +13,11 @@ import { useAdminOverview } from './hooks/useAdminOverview'
 import { useDevices } from './hooks/useDevices'
 import { useEndpointHeartbeat } from './hooks/useEndpointHeartbeat'
 import { useIncidents } from './hooks/useIncidents'
+import { useProtectedZones } from './hooks/useProtectedZones'
+import { ProtectedZoneOverlay } from './components/ProtectedZoneOverlay'
+import { ProtectedZoneEditor } from './components/ProtectedZoneEditor'
+import { hasProtectedFallback, zoneProtectionDecision, type ThreatState } from './features/zones/zoneMath'
+import type { ProtectedZone } from './api/types'
 import { LatestFrameQueue } from './pipeline/LatestFrameQueue'
 import { PhoneInferenceWorker } from './pipeline/PhoneInferenceWorker'
 import { PipelineMetrics } from './pipeline/PipelineMetrics'
@@ -101,6 +106,8 @@ function getPhoneModel() {
 export default function App() {
   const [appView, setAppView] = useState<AppView>('overview')
   const [selectedDevice, setSelectedDevice] = useState<DeviceInventoryItem | null>(null)
+  const [zoneEditorOpen, setZoneEditorOpen] = useState(false)
+  const [selectedZone, setSelectedZone] = useState<ProtectedZone | null>(null)
   const [active, setActive] = useState<Threat | null>(null)
   const [events, setEvents] = useState<Event[]>([{ id: 1, title: 'Session initialized', time: now(), action: 'Secure — no active threat', mode: 'Secure' }])
   const [menu, setMenu] = useState(false)
@@ -143,6 +150,7 @@ export default function App() {
   const adminOverview = useAdminOverview(runtimeConfig)
   const deviceInventory = useDevices(runtimeConfig)
   const incidents = useIncidents(runtimeConfig)
+  const protectedZones = useProtectedZones(runtimeConfig)
   const currentSessionState = active?.mode === 'Lockdown' ? 'LOCKDOWN' : active?.mode === 'Warning' ? 'WARNING' : cameraState === 'error' ? 'MONITORING_INTERRUPTED' : 'SECURE'
   const latestRiskScore = active?.mode === 'Lockdown' ? Math.max(80, active.confidence) : active?.mode === 'Warning' ? Math.max(60, active.confidence) : Math.min(29, Math.round(Math.max(0, phoneSnapshot.confidence) * 100))
   const heartbeatStatus = useEndpointHeartbeat(runtimeConfig, {
@@ -451,6 +459,10 @@ export default function App() {
   const operationalState = phoneModelState === 'loading' ? 'MODEL LOADING' : phoneModelState === 'error' ? 'MODEL ERROR' : cameraState !== 'scanning' ? 'CAMERA OFFLINE' : backendState !== 'connected' ? 'DEGRADED PROTECTION' : 'PROTECTION ACTIVE'
   const faceCount = backendAnalysis?.faces_count || 0
   const highestPhoneConfidence = Math.max(0, ...phoneDetections.map(item => item.score))
+  const threatState: ThreatState = active?.mode === 'Lockdown' ? 'LOCKDOWN' : active?.mode === 'Warning' ? 'WARNING' : 'SECURE'
+  const zoneDecisions = zoneProtectionDecision(protectedZones.zones, threatState)
+  const activeZoneProtection = zoneDecisions.some(item => item.active)
+  const fullDashboardFallback = hasProtectedFallback(protectedZones.zones, threatState)
 
   return <div className="app">
     <header className="nav-wrap">
@@ -511,14 +523,15 @@ export default function App() {
           </div>
           <div className="camera-info">
             <div className="kicker">REAL-TIME OPTICAL DLP</div><h3>COCO-SSD phone + OpenCV face detection</h3><div className={`operational-status ${operationalState.toLowerCase().replaceAll(' ', '-')}`}>{operationalState}</div><p>{cameraMessage}</p>
-            <div className="backend-badges"><span className={backendState}><i/>Face backend: {backendState}</span><span className={phoneModelState === 'ready' ? 'connected' : phoneModelState === 'error' ? 'offline' : 'connecting'}><i/>Phone model: {phoneModelState === 'ready' ? 'MODEL READY' : phoneModelState === 'error' ? 'MODEL ERROR' : 'MODEL LOADING'}</span></div>
+            <div className="backend-badges"><span className={backendState}><i/>Face backend: {backendState}</span><span className={phoneModelState === 'ready' ? 'connected' : phoneModelState === 'error' ? 'offline' : 'connecting'}><i/>Phone model: {phoneModelState === 'ready' ? 'MODEL READY' : phoneModelState === 'error' ? 'MODEL ERROR' : 'MODEL LOADING'}</span><span className={protectedZones.zones.length ? 'connected' : 'offline'}><i/>Zones: {protectedZones.zones.length ? `${protectedZones.zones.length} configured` : 'not configured'}</span></div>
             {phoneModelError && <div className="model-error">{phoneModelError}</div>}
             <div className="runtime-grid"><span><b>{pipelineMetrics.captureFps}</b> capture FPS</span><span><b>{pipelineMetrics.phoneInferenceFps}</b> phone FPS</span><span><b>{pipelineMetrics.backendInferenceFps}</b> backend FPS</span><span><b>{faceCount}</b> faces</span><span><b>{phoneDetections.length}</b> phones</span><span><b>{Math.round(highestPhoneConfidence * 100)}%</b> phone confidence</span><span><b>{pipelineMetrics.averagePhoneLatencyMs}ms</b> avg phone latency</span><span><b>{pipelineMetrics.averageFaceLatencyMs}ms</b> avg face latency</span><span><b>{pipelineMetrics.queueDepth}</b> queue depth</span><span><b>{pipelineMetrics.droppedFrames}</b> dropped frames</span><span><b>{pipelineMetrics.staleResultsDiscarded}</b> stale results</span><span><b>{pipelineMetrics.latestProcessedFrameId}</b> latest frame</span></div>
             <div className="camera-rules"><span><Check/> Phone ≥{Math.round(PHONE_POLICY.confidenceThreshold * 100)}% + {PHONE_POLICY.consecutiveFrames} frames</span><span><Check/> 1.5s Warning · 3.0s Lockdown</span><span><Check/> 2.0s clear → Recovery → Secure</span></div>
             {(detections.length > 0 || phoneDetections.length > 0) && <div className="active-detections">{phoneDetections.map((item, index) => <span key={`phone-${index}`}>PHONE · {Math.round(item.score * 100)}% · [{item.bbox.map(Math.round).join(', ')}]</span>)}{detections.map((item, index) => <span key={`${item.type}-${index}`}>{item.type} · {Math.round(item.confidence * 100)}% · [{item.bbox.join(', ')}]</span>)}</div>}
-            <div className="camera-actions">{cameraState !== 'scanning' ? <button onClick={startCamera} disabled={phoneModelState !== 'ready'}><Camera/> Start real camera</button> : <button onClick={stopCamera}><X/> Stop camera</button>}{phoneModelState === 'error' && <button onClick={loadPhoneModel}><RefreshCw/> Retry phone model</button>}{backendState !== 'connected' && <button onClick={connectBackend}><RefreshCw/> Retry face backend</button>}</div>
+            <div className="camera-actions">{cameraState !== 'scanning' ? <button onClick={startCamera} disabled={phoneModelState !== 'ready'}><Camera/> Start real camera</button> : <button onClick={stopCamera}><X/> Stop camera</button>}{phoneModelState === 'error' && <button onClick={loadPhoneModel}><RefreshCw/> Retry phone model</button>}{backendState !== 'connected' && <button onClick={connectBackend}><RefreshCw/> Retry face backend</button>}<button onClick={() => setZoneEditorOpen(value => !value)}><Blocks/> {zoneEditorOpen ? 'Close zone editor' : 'Edit protected zones'}</button></div>
           </div>
         </div>
+        {zoneEditorOpen && <div className="zone-editor-panel"><div className="panel-title"><div><b>Protected workspace zones</b><span>{runtimeConfig.controlPlaneConfigured ? `Workspace ${runtimeConfig.workspaceId}` : 'Control-plane backend required to persist zones'}</span></div><button onClick={() => void protectedZones.refresh()}>Refresh</button></div>{!runtimeConfig.controlPlaneConfigured && <ControlPlaneEmpty onOpenEndpoint={() => setAppView('endpoint')} onRefresh={() => void protectedZones.refresh()}/>} {runtimeConfig.controlPlaneConfigured && protectedZones.error && <div className="admin-error"><TriangleAlert/><div><b>Unable to load protected zones</b><span>{protectedZones.error}</span></div><button onClick={() => void protectedZones.refresh()}>Retry</button></div>} {runtimeConfig.controlPlaneConfigured && <ProtectedZoneEditor zones={protectedZones.zones} selectedZone={selectedZone} onSelect={setSelectedZone} onCreate={zone => void protectedZones.createZone(zone)} onUpdate={(id, updates) => void protectedZones.updateZone(id, updates)} onDelete={id => { void protectedZones.deleteZone(id); setSelectedZone(null) }} onCancel={() => { setSelectedZone(null); setZoneEditorOpen(false) }}/>}</div>}
         <div className={`demo-shell ${active ? active.mode.toLowerCase() : 'secure'} ${detectionMode === 'real' && operationalState !== 'PROTECTION ACTIVE' ? 'degraded' : ''}`}>
           <div className="demo-topbar">
             <div><span className="mini-logo"><Shield size={15}/></span><b>MERIDIAN</b><span className="classified">INTERNAL · CONFIDENTIAL</span></div>
@@ -532,7 +545,7 @@ export default function App() {
           <div className="demo-body">
             <aside className="side-rail"><div className="rail-icon active"><Blocks/></div><div className="rail-icon"><Activity/></div><div className="rail-icon"><Users/></div><div className="rail-icon"><Database/></div><div className="rail-icon"><Shield/></div></aside>
             <div className="dashboard-wrap">
-              <div className={`dashboard ${active ? 'obscured' : ''}`}>
+              <div className={`dashboard ${fullDashboardFallback ? 'obscured' : ''}`}>
                 <div className="dash-heading"><div><small>FICTIONAL INTERNAL DATASET</small><h3>Placeholder Project Metrics</h3></div><span>SAFE DEMO DATA</span></div>
                 <div className="fiction-label">All dashboard data is fictional demo data.</div>
                 <div className="metric-grid">
@@ -552,7 +565,8 @@ export default function App() {
                   <div className="dash-card alerts"><CardTitle title="Detection status" tag={active ? active.mode.toUpperCase() : 'NO ACTIVE ALERTS'}/><div className="alert-row safe"><ShieldCheck/><div><b>{active ? active.reason : 'No active threat detected'}</b><span>{active ? active.detail : 'Waiting for a manual simulation or verified backend result'}</span></div><strong>{active ? active.mode.toUpperCase() : 'SAFE'}</strong></div><div className="alert-row minor"><Camera/><div><b>{detectionMode === 'real' ? cameraMessage : 'Camera inactive'}</b><span>{detectionMode === 'real' ? `Backend ${backendState} · OpenCV face analysis` : 'Simulation mode does not access the camera'}</span></div><strong>INFO</strong></div></div>
                 </div>
               </div>
-              {active && <div className="lock-overlay"><div className="lock-symbol"><LockKeyhole/></div><span>ZERO-TRUST PROTECTION ACTIVE</span><h3>Sensitive data secured</h3><p>{active.action}. Clear the detected risk before resuming this session.</p><button onClick={reset}><RefreshCw/> Reset secure session</button></div>}
+              <ProtectedZoneOverlay zones={protectedZones.zones} state={threatState}/>
+              {active && (fullDashboardFallback || activeZoneProtection) && <div className={fullDashboardFallback ? 'lock-overlay' : 'zone-protection-summary'}><div className="lock-symbol"><LockKeyhole/></div><span>ZERO-TRUST PROTECTION ACTIVE</span><h3>{fullDashboardFallback ? 'Sensitive data secured' : 'Protected zones secured'}</h3><p>{fullDashboardFallback ? `${active.action}. No protected zones are configured, so GlassWall is using full-dashboard fallback protection.` : `${zoneDecisions.filter(item => item.active).length} configured protected zone${zoneDecisions.filter(item => item.active).length === 1 ? '' : 's'} secured by policy.`}</p><button onClick={reset}><RefreshCw/> Reset secure session</button></div>}
             </div>
           </div>
         </div>

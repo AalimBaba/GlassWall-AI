@@ -133,3 +133,32 @@ export type IncidentList = {
   offset: number
   sample_data: boolean
 }
+
+export type ZoneSensitivity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+export type ZoneProtectionAction = 'BLUR' | 'REDACT' | 'HIDE' | 'WATERMARK'
+
+export type ProtectedZone = {
+  id: string
+  organization_id: string
+  workspace_id: string
+  name: string
+  description: string
+  relative_x: number
+  relative_y: number
+  relative_width: number
+  relative_height: number
+  sensitivity: ZoneSensitivity
+  protection_action: ZoneProtectionAction
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ProtectedZoneInput = Omit<ProtectedZone, 'id' | 'organization_id' | 'workspace_id' | 'created_at' | 'updated_at'>
+
+export type ProtectedZoneList = {
+  organization_id: string
+  workspace_id: string
+  zones: ProtectedZone[]
+  sample_data: boolean
+}

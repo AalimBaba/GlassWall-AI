@@ -1,4 +1,4 @@
-import type { AdminOverview, DeviceInventory, EndpointHeartbeatPayload, EndpointHeartbeatResponse, IncidentDetail, IncidentList, IncidentStatus } from './types'
+import type { AdminOverview, DeviceInventory, EndpointHeartbeatPayload, EndpointHeartbeatResponse, IncidentDetail, IncidentList, IncidentStatus, ProtectedZone, ProtectedZoneInput, ProtectedZoneList } from './types'
 
 export class ApiError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -86,6 +86,33 @@ export function createApiClient({ baseUrl, timeoutMs }: ApiClientOptions) {
         baseUrl,
         `/api/organizations/${organizationId}/incidents/${incidentId}/notes`,
         { method: 'POST', body: JSON.stringify({ note }), signal },
+        timeoutMs,
+      )
+    },
+    getProtectedZones(organizationId: string, workspaceId: string, signal?: AbortSignal) {
+      return request<ProtectedZoneList>(baseUrl, `/api/organizations/${organizationId}/workspaces/${workspaceId}/zones`, { signal }, timeoutMs)
+    },
+    createProtectedZone(organizationId: string, workspaceId: string, payload: ProtectedZoneInput, signal?: AbortSignal) {
+      return request<ProtectedZone>(
+        baseUrl,
+        `/api/organizations/${organizationId}/workspaces/${workspaceId}/zones`,
+        { method: 'POST', body: JSON.stringify(payload), signal },
+        timeoutMs,
+      )
+    },
+    updateProtectedZone(organizationId: string, workspaceId: string, zoneId: string, payload: Partial<ProtectedZoneInput>, signal?: AbortSignal) {
+      return request<ProtectedZone>(
+        baseUrl,
+        `/api/organizations/${organizationId}/workspaces/${workspaceId}/zones/${zoneId}`,
+        { method: 'PATCH', body: JSON.stringify(payload), signal },
+        timeoutMs,
+      )
+    },
+    deleteProtectedZone(organizationId: string, workspaceId: string, zoneId: string, signal?: AbortSignal) {
+      return request<{ deleted: boolean; zone_id: string }>(
+        baseUrl,
+        `/api/organizations/${organizationId}/workspaces/${workspaceId}/zones/${zoneId}`,
+        { method: 'DELETE', signal },
         timeoutMs,
       )
     },

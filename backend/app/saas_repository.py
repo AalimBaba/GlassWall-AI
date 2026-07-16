@@ -23,10 +23,12 @@ from .saas_models import (
     IncidentSignal,
     IncidentStatus,
     Organization,
+    ProtectionAction,
     ProtectedZone,
     RemediationAction,
     ThreatIncident,
     Workspace,
+    ZoneSensitivity,
 )
 
 
@@ -98,6 +100,7 @@ class SaaSRepository:
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
         self._ensure_sqlite_incident_columns()
+        self._ensure_sqlite_zone_columns()
 
     def _ensure_sqlite_incident_columns(self) -> None:
         if self.engine.dialect.name != "sqlite":
@@ -131,6 +134,24 @@ class SaaSRepository:
             for name, definition in event_columns.items():
                 if name not in event_existing:
                     connection.execute(text(f"ALTER TABLE incident_events ADD COLUMN {name} {definition}"))
+
+    def _ensure_sqlite_zone_columns(self) -> None:
+        if self.engine.dialect.name != "sqlite":
+            return
+        inspector = inspect(self.engine)
+        if "protected_zones" not in inspector.get_table_names():
+            return
+        existing = {column["name"] for column in inspector.get_columns("protected_zones")}
+        columns = {
+            "description": "TEXT NOT NULL DEFAULT ''",
+            "protection_action": "VARCHAR(32) NOT NULL DEFAULT 'BLUR'",
+            "created_at": "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        }
+        with self.engine.begin() as connection:
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE protected_zones ADD COLUMN {name} {definition}"))
 
     def ping(self) -> None:
         with self.engine.connect() as connection:
@@ -415,27 +436,84 @@ class SaaSRepository:
         organization_id: str,
         workspace_id: str,
         name: str,
-        x: float,
-        y: float,
-        width: float,
-        height: float,
-        sensitivity: str = "standard",
+        relative_x: float,
+        relative_y: float,
+        relative_width: float,
+        relative_height: float,
+        sensitivity: str = ZoneSensitivity.HIGH.value,
+        protection_action: str = ProtectionAction.BLUR.value,
+        description: str = "",
+        enabled: bool = True,
     ) -> ProtectedZone:
         with self.session_scope() as session:
             self._tenant_get(session, Workspace, organization_id, workspace_id)
+            self._validate_zone(name, relative_x, relative_y, relative_width, relative_height, sensitivity, protection_action)
             zone = ProtectedZone(
                 organization_id=organization_id,
                 workspace_id=workspace_id,
                 name=name,
-                x=x,
-                y=y,
-                width=width,
-                height=height,
+                description=description,
+                relative_x=relative_x,
+                relative_y=relative_y,
+                relative_width=relative_width,
+                relative_height=relative_height,
                 sensitivity=sensitivity,
+                protection_action=protection_action,
+                enabled=enabled,
             )
             session.add(zone)
             session.flush()
             return zone
+
+    def list_protected_zones(self, organization_id: str, workspace_id: str) -> list[ProtectedZone]:
+        with self.session_scope() as session:
+            self._tenant_get(session, Workspace, organization_id, workspace_id)
+            return list(session.scalars(
+                select(ProtectedZone)
+                .where(ProtectedZone.organization_id == organization_id, ProtectedZone.workspace_id == workspace_id)
+                .order_by(ProtectedZone.created_at.asc())
+            ).all())
+
+    def update_protected_zone(
+        self,
+        organization_id: str,
+        workspace_id: str,
+        zone_id: str,
+        updates: dict[str, object],
+    ) -> ProtectedZone:
+        with self.session_scope() as session:
+            self._tenant_get(session, Workspace, organization_id, workspace_id)
+            zone = self._tenant_get(session, ProtectedZone, organization_id, zone_id)
+            if zone.workspace_id != workspace_id:
+                raise TenantAccessError("ProtectedZone is not available in workspace scope")
+            name = str(updates.get("name", zone.name))
+            relative_x = float(updates.get("relative_x", zone.relative_x))
+            relative_y = float(updates.get("relative_y", zone.relative_y))
+            relative_width = float(updates.get("relative_width", zone.relative_width))
+            relative_height = float(updates.get("relative_height", zone.relative_height))
+            sensitivity = str(updates.get("sensitivity", zone.sensitivity))
+            protection_action = str(updates.get("protection_action", zone.protection_action))
+            self._validate_zone(name, relative_x, relative_y, relative_width, relative_height, sensitivity, protection_action)
+            zone.name = name
+            zone.description = str(updates.get("description", zone.description))
+            zone.relative_x = relative_x
+            zone.relative_y = relative_y
+            zone.relative_width = relative_width
+            zone.relative_height = relative_height
+            zone.sensitivity = sensitivity
+            zone.protection_action = protection_action
+            zone.enabled = bool(updates.get("enabled", zone.enabled))
+            zone.updated_at = datetime.now(timezone.utc)
+            session.flush()
+            return zone
+
+    def delete_protected_zone(self, organization_id: str, workspace_id: str, zone_id: str) -> None:
+        with self.session_scope() as session:
+            self._tenant_get(session, Workspace, organization_id, workspace_id)
+            zone = self._tenant_get(session, ProtectedZone, organization_id, zone_id)
+            if zone.workspace_id != workspace_id:
+                raise TenantAccessError("ProtectedZone is not available in workspace scope")
+            session.delete(zone)
 
     def admin_overview(self, organization_id: str, at: datetime | None = None, expiry_seconds: int = 60) -> dict[str, object]:
         with self.session_scope() as session:
@@ -508,6 +586,29 @@ class SaaSRepository:
         if record is None or getattr(record, "organization_id", None) != organization_id:
             raise TenantAccessError(f"{model.__name__} is not available in organization scope")
         return record
+
+    @staticmethod
+    def _validate_zone(
+        name: str,
+        relative_x: float,
+        relative_y: float,
+        relative_width: float,
+        relative_height: float,
+        sensitivity: str,
+        protection_action: str,
+    ) -> None:
+        if not name.strip():
+            raise ValueError("zone name must not be empty")
+        if sensitivity not in {item.value for item in ZoneSensitivity}:
+            raise ValueError("unsupported zone sensitivity")
+        if protection_action not in {item.value for item in ProtectionAction}:
+            raise ValueError("unsupported protection action")
+        if not (0 <= relative_x <= 1 and 0 <= relative_y <= 1):
+            raise ValueError("zone origin must be between 0 and 1")
+        if relative_width <= 0 or relative_height <= 0:
+            raise ValueError("zone width and height must be greater than 0")
+        if relative_x + relative_width > 1 or relative_y + relative_height > 1:
+            raise ValueError("zone dimensions must stay inside the workspace")
 
     def _sync_incident_for_heartbeat(
         self,

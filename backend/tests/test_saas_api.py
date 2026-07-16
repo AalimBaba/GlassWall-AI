@@ -127,3 +127,77 @@ def test_incident_api_enforces_tenant_isolation() -> None:
     client = TestClient(main.app)
     response = client.get(f"/api/organizations/{org_b.id}/incidents/{incident.id}")
     assert response.status_code == 404
+
+
+def test_protected_zone_api_crud_and_validation() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    repo = SaaSRepository(engine=engine)
+    repo.create_schema()
+    main.saas_repo = repo
+
+    org = repo.create_organization("Zones Tenant", "zones-tenant")
+    workspace = repo.create_workspace(org.id, "Executive Dashboard")
+
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    created = client.post(
+        f"/api/organizations/{org.id}/workspaces/{workspace.id}/zones",
+        json={
+            "name": "Revenue panel",
+            "description": "Confidential revenue values",
+            "relative_x": 0.1,
+            "relative_y": 0.1,
+            "relative_width": 0.3,
+            "relative_height": 0.2,
+            "sensitivity": "HIGH",
+            "protection_action": "BLUR",
+            "enabled": True,
+        },
+    )
+    assert created.status_code == 200
+    zone_id = created.json()["id"]
+    assert created.json()["sample_data"] is False if "sample_data" in created.json() else True
+
+    listed = client.get(f"/api/organizations/{org.id}/workspaces/{workspace.id}/zones")
+    assert listed.status_code == 200
+    assert listed.json()["zones"][0]["name"] == "Revenue panel"
+    assert listed.json()["sample_data"] is False
+
+    patched = client.patch(
+        f"/api/organizations/{org.id}/workspaces/{workspace.id}/zones/{zone_id}",
+        json={"relative_x": 0.2, "protection_action": "REDACT", "enabled": False},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["relative_x"] == 0.2
+    assert patched.json()["protection_action"] == "REDACT"
+    assert patched.json()["enabled"] is False
+
+    invalid = client.post(
+        f"/api/organizations/{org.id}/workspaces/{workspace.id}/zones",
+        json={"name": "Bad", "relative_x": 0.9, "relative_y": 0.1, "relative_width": 0.2, "relative_height": 0.2},
+    )
+    assert invalid.status_code == 400
+
+    deleted = client.delete(f"/api/organizations/{org.id}/workspaces/{workspace.id}/zones/{zone_id}")
+    assert deleted.status_code == 200
+    assert client.get(f"/api/organizations/{org.id}/workspaces/{workspace.id}/zones").json()["zones"] == []
+
+
+def test_protected_zone_api_tenant_isolation() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    repo = SaaSRepository(engine=engine)
+    repo.create_schema()
+    main.saas_repo = repo
+    org_a = repo.create_organization("Zone A", "zone-a-api")
+    workspace_a = repo.create_workspace(org_a.id, "A")
+    org_b = repo.create_organization("Zone B", "zone-b-api")
+    zone = repo.add_protected_zone(org_a.id, workspace_a.id, "Token panel", 0.1, 0.1, 0.2, 0.2)
+
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    response = client.get(f"/api/organizations/{org_b.id}/workspaces/{workspace_a.id}/zones")
+    assert response.status_code == 404
+    response = client.patch(f"/api/organizations/{org_b.id}/workspaces/{workspace_a.id}/zones/{zone.id}", json={"name": "bad"})
+    assert response.status_code == 404
