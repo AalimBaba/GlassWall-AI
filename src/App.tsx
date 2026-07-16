@@ -12,6 +12,10 @@ import type { DeviceInventoryItem, EndpointHealth } from './api/types'
 import { useAdminOverview } from './hooks/useAdminOverview'
 import { useDevices } from './hooks/useDevices'
 import { useEndpointHeartbeat } from './hooks/useEndpointHeartbeat'
+import { LatestFrameQueue } from './pipeline/LatestFrameQueue'
+import { PhoneInferenceWorker } from './pipeline/PhoneInferenceWorker'
+import { PipelineMetrics } from './pipeline/PipelineMetrics'
+import type { CapturedFrame, FaceInferenceResult, PipelineMetricsSnapshot } from './pipeline/types'
 import { PHONE_POLICY, PhoneThreatTracker, type PhoneTrackerSnapshot } from './phoneThreatTracker'
 
 type Threat = { mode: 'Warning' | 'Lockdown'; reason: string; detail: string; confidence: number; action: string; icon: typeof Smartphone }
@@ -22,7 +26,19 @@ type BackendState = 'connecting' | 'connected' | 'offline'
 type ModelState = 'loading' | 'ready' | 'error'
 type AppView = 'overview' | 'endpoint' | 'devices' | 'incidents' | 'policies' | 'analytics' | 'settings'
 type BackendDetection = { type: 'FACE' | 'PHONE' | 'CAMERA'; confidence: number; bbox: [number, number, number, number] }
-type AnalysisResult = { state: 'SECURE' | 'WARNING' | 'LOCKDOWN'; detections: BackendDetection[]; faces_count: number; phone_detected: boolean; threat_reason: string | null; action: 'NONE' | 'BLUR' | 'LOCKDOWN'; timestamp: number; phone_model_loaded: boolean; error?: string }
+type AnalysisResult = { state: 'SECURE' | 'WARNING' | 'LOCKDOWN'; detections: BackendDetection[]; faces_count: number; phone_detected: boolean; threat_reason: string | null; action: 'NONE' | 'BLUR' | 'LOCKDOWN'; timestamp: number; phone_model_loaded: boolean; error?: string; frame_id?: number }
+
+const EMPTY_PIPELINE_METRICS: PipelineMetricsSnapshot = {
+  captureFps: 0,
+  phoneInferenceFps: 0,
+  backendInferenceFps: 0,
+  averagePhoneLatencyMs: 0,
+  averageFaceLatencyMs: 0,
+  queueDepth: 0,
+  droppedFrames: 0,
+  staleResultsDiscarded: 0,
+  latestProcessedFrameId: 0,
+}
 
 const LINKS = {
   github: 'https://github.com/AalimBaba/GlassWall-AI',
@@ -100,11 +116,19 @@ export default function App() {
   const [inferenceFps, setInferenceFps] = useState(0)
   const [inferenceLatencyMs, setInferenceLatencyMs] = useState(0)
   const [lastDetectionTimestamp, setLastDetectionTimestamp] = useState<number | null>(null)
+  const [pipelineMetrics, setPipelineMetrics] = useState<PipelineMetricsSnapshot>(EMPTY_PIPELINE_METRICS)
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const phoneModelRef = useRef<ObjectDetection | null>(null)
+  const phoneWorkerRef = useRef(new PhoneInferenceWorker(getPhoneModel))
+  const phoneQueueRef = useRef(new LatestFrameQueue<CapturedFrame>(2))
+  const backendQueueRef = useRef(new LatestFrameQueue<CapturedFrame>(1))
+  const metricsRef = useRef(new PipelineMetrics())
+  const captureFrameIdRef = useRef(0)
+  const pipelineAbortRef = useRef<AbortController | null>(null)
+  const backendLastAcceptedFrameRef = useRef(0)
   const phoneTrackerRef = useRef(new PhoneThreatTracker())
   const phoneInferenceBusyRef = useRef(false)
   const phoneLastFrameAtRef = useRef(0)
@@ -146,12 +170,18 @@ export default function App() {
     phoneLastStateRef.current = 'SECURE'
     phoneProtectionRef.current = null
     lastBackendStateRef.current = 'SECURE'
+    phoneQueueRef.current.clear()
+    backendQueueRef.current.clear()
+    metricsRef.current.reset()
+    setPipelineMetrics(EMPTY_PIPELINE_METRICS)
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify({ type: 'reset', timestamp: Date.now() }))
     setEvents(old => [{ id: Date.now(), title: 'Session reset', time: now(), action: 'Returned to secure state; 3s cooldown active', mode: 'Secure' }, ...old].slice(0, 6))
     if (cameraState === 'scanning') setCameraMessage('Camera active — no threat detected')
   }
 
   const stopCamera = () => {
+    pipelineAbortRef.current?.abort()
+    pipelineAbortRef.current = null
     if (frameTimerRef.current) window.clearInterval(frameTimerRef.current)
     frameTimerRef.current = null
     streamRef.current?.getTracks().forEach(track => track.stop())
@@ -164,6 +194,10 @@ export default function App() {
     setPhoneSnapshot(phoneTrackerRef.current.reset())
     setLastDetectionTimestamp(null)
     phoneProtectionRef.current = null
+    phoneQueueRef.current.clear()
+    backendQueueRef.current.clear()
+    metricsRef.current.reset()
+    setPipelineMetrics(EMPTY_PIPELINE_METRICS)
   }
 
   const runPhoneDetection = async () => {
@@ -220,6 +254,81 @@ export default function App() {
     socket.send(JSON.stringify({ frame: canvas.toDataURL('image/jpeg', .7), timestamp: Date.now() }))
   }
 
+  const updatePipelineMetrics = () => {
+    setPipelineMetrics(metricsRef.current.snapshot(
+      phoneQueueRef.current.size() + backendQueueRef.current.size(),
+      phoneQueueRef.current.droppedCount() + backendQueueRef.current.droppedCount(),
+    ))
+  }
+
+  const runPhoneWorkerLoop = async (signal: AbortSignal) => {
+    phoneWorkerRef.current.reset()
+    while (!signal.aborted) {
+      let frame: CapturedFrame
+      try { frame = await phoneQueueRef.current.take(signal) } catch { return }
+      const video = videoRef.current
+      if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) continue
+      try {
+        const result = await phoneWorkerRef.current.infer(frame, video)
+        if (!result || signal.aborted) continue
+        metricsRef.current.markPhoneInference(result.latencyMs)
+        setInferenceLatencyMs(Math.round(result.latencyMs))
+        setInferenceFps(result.latencyMs > 0 ? Math.round(10000 / result.latencyMs) / 10 : 0)
+        const phones = result.detections
+        setPhoneDetections(phones as DetectedObject[])
+        const highest = Math.max(0, ...phones.map(item => item.score))
+        if (highest > 0) {
+          phoneLastConfidenceRef.current = highest
+          setLastDetectionTimestamp(result.capturedAt)
+        }
+        const snapshot = phoneTrackerRef.current.update(phones.length > 0, highest, result.capturedAt)
+        setPhoneSnapshot(snapshot)
+        if (snapshot.state === 'WARNING') phoneProtectionRef.current = 'Warning'
+        if (snapshot.state === 'LOCKDOWN') phoneProtectionRef.current = 'Lockdown'
+        if (snapshot.state === 'SECURE') phoneProtectionRef.current = null
+        if (snapshot.state !== phoneLastStateRef.current && ['WARNING', 'LOCKDOWN', 'RECOVERY', 'SECURE'].includes(snapshot.state)) {
+          const transition = `${phoneLastStateRef.current} -> ${snapshot.state}`
+          setEvents(old => [{ id: result.capturedAt, title: `Real detection: phone ${transition}`, time: now(), confidence: highest ? Math.round(highest * 100) : undefined, action: snapshot.state === 'LOCKDOWN' ? 'Sensitive data obscured' : snapshot.state === 'WARNING' ? 'Privacy blur enabled' : snapshot.state === 'RECOVERY' ? 'Protection held during recovery' : 'Returned to secure', mode: snapshot.state === 'LOCKDOWN' ? 'Lockdown' : snapshot.state === 'WARNING' || snapshot.state === 'RECOVERY' ? 'Warning' : 'Secure' }, ...old].slice(0, 10))
+        }
+        phoneLastStateRef.current = snapshot.state
+      } catch (error) {
+        setPhoneModelState('error')
+        setPhoneModelError(error instanceof Error ? error.message : 'Phone inference failed')
+      } finally {
+        updatePipelineMetrics()
+      }
+    }
+  }
+
+  const runBackendWorkerLoop = async (signal: AbortSignal) => {
+    while (!signal.aborted) {
+      let frame: CapturedFrame
+      try { frame = await backendQueueRef.current.take(signal) } catch { return }
+      const video = videoRef.current
+      const canvas = canvasRef.current
+      const socket = socketRef.current
+      if (!video || !canvas || !socket || socket.readyState !== WebSocket.OPEN || awaitingResultRef.current) continue
+      canvas.width = 480
+      canvas.height = Math.round(480 * frame.height / frame.width) || 360
+      const context = canvas.getContext('2d')
+      if (!context) continue
+      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      awaitingResultRef.current = true
+      socket.send(JSON.stringify({ frame: canvas.toDataURL('image/jpeg', .7), timestamp: frame.capturedAt, frame_id: frame.frameId }))
+      updatePipelineMetrics()
+    }
+  }
+
+  const capturePipelineFrame = () => {
+    const video = videoRef.current
+    if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return
+    const frame: CapturedFrame = { frameId: ++captureFrameIdRef.current, capturedAt: Date.now(), width: video.videoWidth, height: video.videoHeight }
+    phoneQueueRef.current.push(frame)
+    backendQueueRef.current.push(frame)
+    metricsRef.current.markCapture(frame.frameId)
+    updatePipelineMetrics()
+  }
+
   const startCamera = async () => {
     stopCamera()
     setDetectionMode('real')
@@ -232,7 +341,11 @@ export default function App() {
       if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play() }
       setCameraState('scanning')
       setCameraMessage('Camera active — no threat detected')
-      frameTimerRef.current = window.setInterval(sendFrame, 400)
+      const controller = new AbortController()
+      pipelineAbortRef.current = controller
+      void runPhoneWorkerLoop(controller.signal)
+      void runBackendWorkerLoop(controller.signal)
+      frameTimerRef.current = window.setInterval(capturePipelineFrame, 100)
     } catch (error) {
       stopCamera(); setDetectionMode('real'); setCameraState('error')
       setCameraMessage(error instanceof Error && error.name === 'NotAllowedError' ? 'Camera permission denied — no analysis is running' : 'Camera unavailable — no analysis is running')
@@ -259,6 +372,15 @@ export default function App() {
       let result: AnalysisResult
       try { result = JSON.parse(event.data) as AnalysisResult } catch { return }
       if (result.error) { setCameraMessage(`Backend rejected frame: ${result.error}`); return }
+      if (result.frame_id && result.frame_id < backendLastAcceptedFrameRef.current) {
+        metricsRef.current.markStaleResult()
+        updatePipelineMetrics()
+        return
+      }
+      if (result.frame_id) backendLastAcceptedFrameRef.current = result.frame_id
+      const faceLatency = Math.max(0, Date.now() - result.timestamp)
+      metricsRef.current.markFaceInference(faceLatency)
+      updatePipelineMetrics()
       setDetections(result.detections)
       if (result.detections.length > 0) setLastDetectionTimestamp(result.timestamp)
       setBackendAnalysis(result)
@@ -388,7 +510,7 @@ export default function App() {
             <div className="kicker">REAL-TIME OPTICAL DLP</div><h3>COCO-SSD phone + OpenCV face detection</h3><div className={`operational-status ${operationalState.toLowerCase().replaceAll(' ', '-')}`}>{operationalState}</div><p>{cameraMessage}</p>
             <div className="backend-badges"><span className={backendState}><i/>Face backend: {backendState}</span><span className={phoneModelState === 'ready' ? 'connected' : phoneModelState === 'error' ? 'offline' : 'connecting'}><i/>Phone model: {phoneModelState === 'ready' ? 'MODEL READY' : phoneModelState === 'error' ? 'MODEL ERROR' : 'MODEL LOADING'}</span></div>
             {phoneModelError && <div className="model-error">{phoneModelError}</div>}
-            <div className="runtime-grid"><span><b>{inferenceFps}</b> inference FPS</span><span><b>{faceCount}</b> faces</span><span><b>{phoneDetections.length}</b> phones</span><span><b>{Math.round(highestPhoneConfidence * 100)}%</b> phone confidence</span></div>
+            <div className="runtime-grid"><span><b>{pipelineMetrics.captureFps}</b> capture FPS</span><span><b>{pipelineMetrics.phoneInferenceFps}</b> phone FPS</span><span><b>{pipelineMetrics.backendInferenceFps}</b> backend FPS</span><span><b>{faceCount}</b> faces</span><span><b>{phoneDetections.length}</b> phones</span><span><b>{Math.round(highestPhoneConfidence * 100)}%</b> phone confidence</span><span><b>{pipelineMetrics.averagePhoneLatencyMs}ms</b> avg phone latency</span><span><b>{pipelineMetrics.averageFaceLatencyMs}ms</b> avg face latency</span><span><b>{pipelineMetrics.queueDepth}</b> queue depth</span><span><b>{pipelineMetrics.droppedFrames}</b> dropped frames</span><span><b>{pipelineMetrics.staleResultsDiscarded}</b> stale results</span><span><b>{pipelineMetrics.latestProcessedFrameId}</b> latest frame</span></div>
             <div className="camera-rules"><span><Check/> Phone ≥{Math.round(PHONE_POLICY.confidenceThreshold * 100)}% + {PHONE_POLICY.consecutiveFrames} frames</span><span><Check/> 1.5s Warning · 3.0s Lockdown</span><span><Check/> 2.0s clear → Recovery → Secure</span></div>
             {(detections.length > 0 || phoneDetections.length > 0) && <div className="active-detections">{phoneDetections.map((item, index) => <span key={`phone-${index}`}>PHONE · {Math.round(item.score * 100)}% · [{item.bbox.map(Math.round).join(', ')}]</span>)}{detections.map((item, index) => <span key={`${item.type}-${index}`}>{item.type} · {Math.round(item.confidence * 100)}% · [{item.bbox.join(', ')}]</span>)}</div>}
             <div className="camera-actions">{cameraState !== 'scanning' ? <button onClick={startCamera} disabled={phoneModelState !== 'ready'}><Camera/> Start real camera</button> : <button onClick={stopCamera}><X/> Stop camera</button>}{phoneModelState === 'error' && <button onClick={loadPhoneModel}><RefreshCw/> Retry phone model</button>}{backendState !== 'connected' && <button onClick={connectBackend}><RefreshCw/> Retry face backend</button>}</div>

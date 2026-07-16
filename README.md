@@ -30,6 +30,49 @@ GlassWall AI protects sensitive dashboard content when an actual webcam frame co
 - Purpose: count face regions only. There is no identity recognition or biometric enrollment.
 - Score: a bounded value derived from the cascade's real level weight; it is not a calibrated identity probability.
 
+## Real-time inference pipeline
+
+The Endpoint Protection client now uses a staged latest-frame pipeline rather than letting webcam capture, phone inference, backend frame encoding, and UI state updates all compete inside one callback.
+
+```mermaid
+flowchart LR
+  Capture["Frame Capture<br/>10 FPS target"] --> Queue["Bounded Latest-Frame Queue<br/>capacity 1-2"]
+  Queue --> Phone["Browser Phone Inference<br/>COCO-SSD single-flight"]
+  Queue --> Face["Backend Face Inference<br/>FastAPI/OpenCV single-flight"]
+  Phone --> Fusion["Detection Fusion<br/>stale result guard"]
+  Face --> Fusion
+  Fusion --> Temporal["Temporal Analysis<br/>phone/observer persistence"]
+  Temporal --> Risk["Risk + State Coordinator"]
+  Risk --> UI["UI Protection<br/>Observe/Warning/Lockdown/Recovery"]
+  Risk --> Report["Heartbeat + Incident Reporting"]
+```
+
+Pipeline behavior:
+
+- capture is capped at roughly 10 FPS;
+- phone inference and backend face inference consume independent bounded queues;
+- queue overflow uses latest-frame-wins and records dropped frames;
+- COCO-SSD runs single-flight, so slow model calls cannot pile up;
+- backend face analysis runs single-flight from the browser and CPU-bound OpenCV work is moved off the FastAPI event loop with `asyncio.to_thread()`;
+- backend inference is bounded by a semaphore and reports dropped/busy frames instead of creating an unlimited backlog;
+- stale backend results with older frame IDs are discarded;
+- stopping monitoring aborts worker loops, clears queues, and resets metrics;
+- browser-side phone detection continues when the backend is unavailable.
+
+The live diagnostics panel reports real counters only:
+
+- Capture FPS
+- Phone Inference FPS
+- Backend Inference FPS
+- Average Phone Latency
+- Average Face Latency
+- Queue Depth
+- Dropped Frames
+- Stale Results Discarded
+- Latest Processed Frame ID
+
+The current WebSocket payload remains JSON/base64 for compatibility. A binary Blob/WebSocket transport would reduce encoding overhead and is documented as a future optimization, not claimed as implemented.
+
 ## Threat policy
 
 The phone tracker requires three consecutive qualifying frames before starting its duration clock.
@@ -134,6 +177,22 @@ Endpoint Protection Client
   → Admin Overview API / Devices API
   → Admin Console
 ```
+
+## CI/CD pipeline
+
+GitHub Actions now separates validation from deployment:
+
+```text
+Frontend Install
+  → Frontend Tests
+  → TypeScript/Vite Build
+  → Python Install
+  → Python Tests
+  → GitHub Pages Build
+  → Deploy
+```
+
+The Pages deployment job depends on the test job, so the public frontend is not deployed unless both frontend and backend tests pass. Dependency caching is enabled for Node and Python package installs.
 
 Environment variables:
 
@@ -273,6 +332,11 @@ Automated coverage includes:
 - endpoint heartbeat health expires to Offline;
 - admin overview counts come from stored endpoint and incident records;
 - risk scoring is deterministic, explainable, decays over time, uses hysteresis, and blocks single-frame Lockdown.
+- latest-frame queues drop old frames instead of growing without bound;
+- phone inference is single-flight;
+- stale fused/backend results are rejected;
+- diagnostics are derived from real counters;
+- backend OpenCV inference runs off the async event loop and exposes frame-processing metrics.
 
 ## Mandatory real-camera test matrix
 

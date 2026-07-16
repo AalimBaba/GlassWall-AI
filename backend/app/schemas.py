@@ -26,6 +26,7 @@ class AnalysisResponse(BaseModel):
     threat_reason: str | None
     action: Literal["NONE", "BLUR", "LOCKDOWN"]
     timestamp: int
+    frame_id: int | None = None
     phone_model_loaded: bool = False
     backend: Literal["opencv-haar"] = "opencv-haar"
 

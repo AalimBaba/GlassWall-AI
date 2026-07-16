@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import time
+import asyncio
 from datetime import datetime, timezone
 import os
+from dataclasses import dataclass
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +28,31 @@ saas_repo = SaaSRepository(os.getenv("GLASSWALL_DB_URL", "sqlite:///./glasswall-
 saas_repo.create_schema()
 
 
+@dataclass(slots=True)
+class BackendPipelineMetrics:
+    frames_received: int = 0
+    frames_processed: int = 0
+    frames_dropped: int = 0
+    inference_errors: int = 0
+    active_sessions: int = 0
+    total_inference_latency_ms: float = 0.0
+
+    def snapshot(self) -> dict[str, float | int]:
+        average = self.total_inference_latency_ms / self.frames_processed if self.frames_processed else 0.0
+        return {
+            "frames_received": self.frames_received,
+            "frames_processed": self.frames_processed,
+            "frames_dropped": self.frames_dropped,
+            "inference_errors": self.inference_errors,
+            "active_sessions": self.active_sessions,
+            "average_inference_latency_ms": round(average, 2),
+        }
+
+
+backend_metrics = BackendPipelineMetrics()
+opencv_semaphore = asyncio.Semaphore(2)
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     return {
@@ -33,6 +60,7 @@ def health() -> dict[str, object]:
         "face_detector": "opencv-haar",
         "phone_model_loaded": False,
         "phone_model_note": "Phone detection requires adding a YOLO/COCO model file.",
+        "pipeline_metrics": backend_metrics.snapshot(),
     }
 
 
@@ -131,25 +159,40 @@ def device_inventory(organization_id: str) -> DeviceInventoryResponse:
 @app.websocket("/ws/analyze")
 async def analyze(websocket: WebSocket) -> None:
     await websocket.accept()
+    backend_metrics.active_sessions += 1
     engine = TemporalThreatEngine()
     try:
         while True:
             payload = await websocket.receive_json()
             timestamp = int(payload.get("timestamp", time.time_ns() // 1_000_000))
+            frame_id = payload.get("frame_id")
+            frame_id = int(frame_id) if isinstance(frame_id, int | float | str) and str(frame_id).isdigit() else None
             if payload.get("type") == "reset":
                 engine.reset(timestamp)
-                await websocket.send_json(engine.evaluate([], timestamp).model_dump(mode="json"))
+                await websocket.send_json(engine.evaluate([], timestamp, frame_id).model_dump(mode="json"))
                 continue
             frame = payload.get("frame")
             if not isinstance(frame, str):
                 await websocket.send_json({"error": "frame must be a base64 JPEG string", "timestamp": timestamp})
                 continue
+            backend_metrics.frames_received += 1
+            if opencv_semaphore.locked():
+                backend_metrics.frames_dropped += 1
+                await websocket.send_json({"error": "backend inference busy; frame dropped", "timestamp": timestamp, "frame_id": frame_id})
+                continue
             try:
-                detections = detector.analyze(frame)
+                started = time.perf_counter()
+                async with opencv_semaphore:
+                    detections = await asyncio.to_thread(detector.analyze, frame)
+                backend_metrics.frames_processed += 1
+                backend_metrics.total_inference_latency_ms += (time.perf_counter() - started) * 1000
             except InvalidFrameError as exc:
+                backend_metrics.inference_errors += 1
                 await websocket.send_json({"error": str(exc), "timestamp": timestamp})
                 continue
-            response = engine.evaluate(detections, timestamp)
+            response = engine.evaluate(detections, timestamp, frame_id)
             await websocket.send_json(response.model_dump(mode="json"))
     except WebSocketDisconnect:
         return
+    finally:
+        backend_metrics.active_sessions = max(0, backend_metrics.active_sessions - 1)

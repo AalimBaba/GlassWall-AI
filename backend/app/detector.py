@@ -37,9 +37,14 @@ class FrameDetector:
             raise InvalidFrameError("frame must be valid base64 JPEG data") from exc
         if not raw:
             raise InvalidFrameError("frame is empty")
+        if len(raw) > 2_000_000:
+            raise InvalidFrameError("frame exceeds maximum encoded size")
         image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise InvalidFrameError("frame is not a supported encoded image")
+        height, width = image.shape[:2]
+        if width > 1920 or height > 1080:
+            raise InvalidFrameError("frame dimensions exceed maximum supported size")
         return image
 
     def analyze(self, encoded: str) -> list[Detection]:

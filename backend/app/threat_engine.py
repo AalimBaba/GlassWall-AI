@@ -22,7 +22,7 @@ class TemporalThreatEngine:
         self.cooldown_until = timestamp + cooldown_ms
         self.state = SecurityState.SECURE
 
-    def evaluate(self, detections: list[Detection], timestamp: int) -> AnalysisResponse:
+    def evaluate(self, detections: list[Detection], timestamp: int, frame_id: int | None = None) -> AnalysisResponse:
         faces = [item for item in detections if item.type == "FACE"]
         phones = [item for item in detections if item.type in {"PHONE", "CAMERA"}]
         has_second_face = len(faces) > 1
@@ -31,7 +31,7 @@ class TemporalThreatEngine:
         if timestamp < self.cooldown_until:
             self.second_face_since = None
             self.phone_since = None
-            return self._response(detections, timestamp, None)
+            return self._response(detections, timestamp, None, frame_id)
 
         self.second_face_since = self._update_start(self.second_face_since, has_second_face, timestamp)
         self.phone_since = self._update_start(self.phone_since, has_phone, timestamp)
@@ -59,7 +59,7 @@ class TemporalThreatEngine:
             self.clear_since = None
 
         self.state = next_state
-        return self._response(detections, timestamp, reason)
+        return self._response(detections, timestamp, reason, frame_id)
 
     @staticmethod
     def _update_start(current: int | None, active: bool, timestamp: int) -> int | None:
@@ -68,7 +68,7 @@ class TemporalThreatEngine:
         return current if current is not None else timestamp
 
     def _response(
-        self, detections: list[Detection], timestamp: int, reason: str | None
+        self, detections: list[Detection], timestamp: int, reason: str | None, frame_id: int | None = None
     ) -> AnalysisResponse:
         action = {
             SecurityState.SECURE: "NONE",
@@ -83,4 +83,5 @@ class TemporalThreatEngine:
             threat_reason=reason,
             action=action,
             timestamp=timestamp,
+            frame_id=frame_id,
         )

@@ -21,13 +21,15 @@ def test_health_is_honest_about_phone_model() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["phone_model_loaded"] is False
+    assert "pipeline_metrics" in response.json()
 
 
 def test_websocket_analyzes_real_image_without_fake_detection() -> None:
     with client.websocket_connect("/ws/analyze") as websocket:
-        websocket.send_json({"frame": blank_jpeg(), "timestamp": 1000})
+        websocket.send_json({"frame": blank_jpeg(), "timestamp": 1000, "frame_id": 7})
         result = websocket.receive_json()
     assert result["state"] == "SECURE"
+    assert result["frame_id"] == 7
     assert result["detections"] == []
     assert result["faces_count"] == 0
     assert result["phone_detected"] is False
@@ -38,6 +40,22 @@ def test_websocket_rejects_invalid_frame() -> None:
         websocket.send_json({"frame": "not-base64", "timestamp": 1000})
         result = websocket.receive_json()
     assert "error" in result
+
+
+def test_detector_rejects_oversized_encoded_frame() -> None:
+    with client.websocket_connect("/ws/analyze") as websocket:
+        websocket.send_json({"frame": base64.b64encode(b"x" * 2_000_001).decode(), "timestamp": 1000})
+        result = websocket.receive_json()
+    assert "maximum encoded size" in result["error"]
+
+
+def test_backend_metrics_increment_for_processed_frame() -> None:
+    before = client.get("/health").json()["pipeline_metrics"]["frames_received"]
+    with client.websocket_connect("/ws/analyze") as websocket:
+        websocket.send_json({"frame": blank_jpeg(), "timestamp": 1000})
+        websocket.receive_json()
+    after = client.get("/health").json()["pipeline_metrics"]["frames_received"]
+    assert after >= before + 1
 
 
 def test_websocket_second_face_warning_and_lockdown(monkeypatch) -> None:
