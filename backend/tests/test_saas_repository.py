@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 from sqlalchemy import create_engine
@@ -165,6 +166,9 @@ def test_confirmed_threat_heartbeat_creates_and_dedupes_incident(repo: SaaSRepos
     assert incidents[0].current_risk_score == 67
     _, events, *_ = repo.get_incident_detail(org, incidents[0].id)
     assert [event.event_type for event in events] == ["incident_opened", "state_changed"]
+    metadata = json.loads(events[0].metadata_json)
+    assert metadata["watermark_active"] is True
+    assert len(metadata["watermark_fingerprint"]) == 64
 
 
 def test_secure_heartbeat_does_not_create_incident(repo: SaaSRepository) -> None:

@@ -199,6 +199,33 @@ relative_x, relative_y, relative_width, relative_height
 0.0 <= coordinate <= 1.0
 ```
 
+## Dynamic forensic watermarking
+
+The protected workspace now renders a tiled session watermark over the dashboard. It uses masked identifiers only:
+
+```text
+CONFIDENTIAL · DEVICE-7F2A · SESSION-91C4 · ORG-ABCD · 16 JUL 2026 10:42
+```
+
+Watermark intensity escalates with the current threat state:
+
+- `SECURE`: low opacity, unobtrusive deterrence.
+- `OBSERVE`: moderate watermark readiness.
+- `WARNING`: stronger watermark while protected zones are obscured.
+- `LOCKDOWN`: highly visible tiled watermark over the protected workspace.
+
+The watermark shifts periodically and updates its timestamp without storing webcam frames or exposing personal information. It is documented and presented as a deterrence and attribution aid, not as an impossible-to-remove forensic guarantee.
+
+When an incident opens or escalates, the backend stores only metadata:
+
+- `watermark_active`
+- `watermark_fingerprint`
+- `watermark_policy`
+- `watermark_state`
+- `watermark_activated_at`
+
+The fingerprint is a SHA-256 hash derived from organization, workspace, device, session, incident ID, and a coarse timestamp bucket. No secrets or raw frame data are included. The investigation drawer displays a shortened fingerprint when timeline events contain watermark metadata.
+
 Each zone belongs to one organization and workspace, and tenant checks are enforced for list/create/update/delete operations. A zone includes a name, description, sensitivity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), protection action (`BLUR`, `REDACT`, `HIDE`, `WATERMARK`), and enabled flag.
 
 Zone APIs:

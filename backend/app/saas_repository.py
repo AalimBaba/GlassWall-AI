@@ -30,6 +30,7 @@ from .saas_models import (
     Workspace,
     ZoneSensitivity,
 )
+from .watermark import watermark_fingerprint
 
 
 class TenantAccessError(PermissionError):
@@ -671,6 +672,7 @@ class SaaSRepository:
             )
             session.add(incident)
             session.flush()
+            fingerprint = watermark_fingerprint(organization_id, endpoint.workspace_id, endpoint.device_id, endpoint.id, incident.id, now)
             session.add(IncidentEvent(
                 organization_id=organization_id,
                 incident_id=incident.id,
@@ -678,7 +680,16 @@ class SaaSRepository:
                 source="heartbeat",
                 message=f"Endpoint reported {state}; incident opened from confirmed pipeline state.",
                 risk_score=risk_score,
-                metadata_json=json.dumps({"session_state": state, "backend_connected": heartbeat.backend_connected, "model_loaded": heartbeat.model_loaded}),
+                metadata_json=json.dumps({
+                    "session_state": state,
+                    "backend_connected": heartbeat.backend_connected,
+                    "model_loaded": heartbeat.model_loaded,
+                    "watermark_active": True,
+                    "watermark_fingerprint": fingerprint,
+                    "watermark_policy": "session_tiled_metadata_only",
+                    "watermark_state": state,
+                    "watermark_activated_at": now.isoformat(),
+                }),
                 occurred_at=now,
             ))
             session.add(IncidentEvent(
@@ -688,7 +699,7 @@ class SaaSRepository:
                 source="state_coordinator",
                 message=f"State changed to {state}.",
                 risk_score=risk_score,
-                metadata_json=json.dumps({"action": "LOCKDOWN" if state == "LOCKDOWN" else "BLUR"}),
+                metadata_json=json.dumps({"action": "LOCKDOWN" if state == "LOCKDOWN" else "BLUR", "watermark_fingerprint": fingerprint, "watermark_active": True}),
                 occurred_at=now + timedelta(milliseconds=1),
             ))
             return
@@ -703,6 +714,7 @@ class SaaSRepository:
         active.model_loaded = heartbeat.model_loaded
         active.updated_at = now
         if state != previous_state:
+            fingerprint = watermark_fingerprint(organization_id, endpoint.workspace_id, endpoint.device_id, endpoint.id, active.id, now)
             session.add(IncidentEvent(
                 organization_id=organization_id,
                 incident_id=active.id,
@@ -710,7 +722,7 @@ class SaaSRepository:
                 source="state_coordinator",
                 message=f"State changed from {previous_state} to {state}.",
                 risk_score=risk_score,
-                metadata_json=json.dumps({"previous_state": previous_state, "state": state}),
+                metadata_json=json.dumps({"previous_state": previous_state, "state": state, "watermark_active": True, "watermark_fingerprint": fingerprint, "watermark_state": state, "watermark_activated_at": now.isoformat()}),
                 occurred_at=now,
             ))
         if active.peak_risk_score != previous_peak:
