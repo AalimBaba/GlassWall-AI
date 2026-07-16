@@ -21,14 +21,16 @@ class FrameDetector:
     detector score, not a calibrated identity or recognition probability.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_frame_bytes: int = 2_000_000, max_width: int = 1920, max_height: int = 1080) -> None:
+        self.max_frame_bytes = max_frame_bytes
+        self.max_width = max_width
+        self.max_height = max_height
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         self._face_cascade = cv2.CascadeClassifier(cascade_path)
         if self._face_cascade.empty():
             raise RuntimeError(f"Unable to load OpenCV face cascade: {cascade_path}")
 
-    @staticmethod
-    def decode_frame(encoded: str) -> np.ndarray:
+    def decode_frame(self, encoded: str) -> np.ndarray:
         if "," in encoded:
             encoded = encoded.split(",", 1)[1]
         try:
@@ -37,13 +39,13 @@ class FrameDetector:
             raise InvalidFrameError("frame must be valid base64 JPEG data") from exc
         if not raw:
             raise InvalidFrameError("frame is empty")
-        if len(raw) > 2_000_000:
+        if len(raw) > self.max_frame_bytes:
             raise InvalidFrameError("frame exceeds maximum encoded size")
         image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise InvalidFrameError("frame is not a supported encoded image")
         height, width = image.shape[:2]
-        if width > 1920 or height > 1080:
+        if width > self.max_width or height > self.max_height:
             raise InvalidFrameError("frame dimensions exceed maximum supported size")
         return image
 

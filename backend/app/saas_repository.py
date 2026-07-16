@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 from sqlalchemy import Engine, create_engine, select
+from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .saas_models import (
@@ -70,6 +71,10 @@ class SaaSRepository:
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
+
+    def ping(self) -> None:
+        with self.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
 
     @contextmanager
     def session_scope(self) -> Iterator[Session]:
@@ -248,11 +253,11 @@ class SaaSRepository:
             session.flush()
             return zone
 
-    def admin_overview(self, organization_id: str, at: datetime | None = None) -> dict[str, object]:
+    def admin_overview(self, organization_id: str, at: datetime | None = None, expiry_seconds: int = 60) -> dict[str, object]:
         with self.session_scope() as session:
             if session.get(Organization, organization_id) is None:
                 raise TenantAccessError("Organization is not available")
-        endpoints = self.list_endpoint_health(organization_id, at=at)
+        endpoints = self.list_endpoint_health(organization_id, at=at, expiry_seconds=expiry_seconds)
         incidents = self.list_incidents(organization_id)
         health_counts = {item.value: 0 for item in EndpointHealth}
         state_counts = {"SECURE": 0, "WARNING": 0, "LOCKDOWN": 0}

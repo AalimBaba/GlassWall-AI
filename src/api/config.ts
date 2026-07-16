@@ -1,5 +1,7 @@
 export type RuntimeConfig = {
   apiBaseUrl: string
+  wsBaseUrl: string
+  backendWsUrl: string
   organizationId: string
   workspaceId: string
   deviceId: string
@@ -25,6 +27,8 @@ function localHost() {
 export function getRuntimeConfig(env: EnvLike = import.meta.env): RuntimeConfig {
   const isDev = env.DEV === true || env.DEV === 'true'
   const apiBaseUrl = clean(env.VITE_API_BASE_URL) || (isDev ? `http://${localHost()}:8000` : '')
+  const wsBaseUrl = clean(env.VITE_WS_BASE_URL) || (isDev ? `ws://${localHost()}:8000` : '')
+  const backendWsUrl = clean(env.VITE_BACKEND_WS_URL) || (wsBaseUrl ? `${wsBaseUrl}/ws/analyze` : '')
   const heartbeatIntervalMs = Number(clean(env.VITE_HEARTBEAT_INTERVAL_MS)) || 15_000
   const pollIntervalMs = Number(clean(env.VITE_ADMIN_POLL_INTERVAL_MS)) || 15_000
   const organizationId = clean(env.VITE_GLASSWALL_ORG_ID) || (isDev ? 'dev-org' : '')
@@ -33,6 +37,8 @@ export function getRuntimeConfig(env: EnvLike = import.meta.env): RuntimeConfig 
   const sessionId = clean(env.VITE_GLASSWALL_SESSION_ID) || (isDev ? 'browser-session' : '')
   return {
     apiBaseUrl,
+    wsBaseUrl,
+    backendWsUrl,
     organizationId,
     workspaceId,
     deviceId,

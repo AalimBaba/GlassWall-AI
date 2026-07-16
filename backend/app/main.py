@@ -3,28 +3,45 @@ from __future__ import annotations
 import time
 import asyncio
 from datetime import datetime, timezone
-import os
 from dataclasses import dataclass
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from .config import load_settings
 from .detector import FrameDetector, InvalidFrameError
+from .logging_config import configure_logging
 from .saas_repository import HeartbeatInput, SaaSRepository, TenantAccessError
 from .schemas import AdminOverviewResponse, DeviceInventoryResponse, EndpointHeartbeatRequest, EndpointHealthResponse
 from .threat_engine import TemporalThreatEngine
 
-app = FastAPI(title="GlassWall AI Local Detection API", version="1.0.0")
+settings = load_settings()
+configure_logging(settings.log_level)
+logger = logging.getLogger("glasswall.backend")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("glasswall backend started")
+    try:
+        yield
+    finally:
+        logger.info("glasswall backend shutting down")
+
+
+app = FastAPI(title="GlassWall AI Detection and Control Plane API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=settings.allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-detector = FrameDetector()
-saas_repo = SaaSRepository(os.getenv("GLASSWALL_DB_URL", "sqlite:///./glasswall-dev.db"))
+detector = FrameDetector(max_frame_bytes=settings.max_frame_bytes)
+saas_repo = SaaSRepository(settings.database_url)
 saas_repo.create_schema()
 
 
@@ -57,10 +74,25 @@ opencv_semaphore = asyncio.Semaphore(2)
 def health() -> dict[str, object]:
     return {
         "status": "ok",
+        "environment": settings.environment,
         "face_detector": "opencv-haar",
         "phone_model_loaded": False,
-        "phone_model_note": "Phone detection requires adding a YOLO/COCO model file.",
+        "phone_model_note": "Phone detection runs in the browser through COCO-SSD.",
+        "database_configured": bool(settings.database_url),
+        "allowed_origins": settings.allowed_origins,
+        "max_frame_bytes": settings.max_frame_bytes,
+        "heartbeat_expiry_seconds": settings.heartbeat_expiry_seconds,
         "pipeline_metrics": backend_metrics.snapshot(),
+    }
+
+
+@app.get("/ready")
+def readiness() -> dict[str, object]:
+    saas_repo.ping()
+    return {
+        "status": "ready",
+        "database": "reachable",
+        "environment": settings.environment,
     }
 
 
@@ -116,7 +148,7 @@ def record_endpoint_heartbeat(organization_id: str, payload: EndpointHeartbeatRe
 @app.get("/api/organizations/{organization_id}/admin/overview", response_model=AdminOverviewResponse)
 def admin_overview(organization_id: str) -> AdminOverviewResponse:
     try:
-        return AdminOverviewResponse(**saas_repo.admin_overview(organization_id))
+        return AdminOverviewResponse(**saas_repo.admin_overview(organization_id, expiry_seconds=settings.heartbeat_expiry_seconds))
     except TenantAccessError as exc:
         from fastapi import HTTPException
 
@@ -126,7 +158,7 @@ def admin_overview(organization_id: str) -> AdminOverviewResponse:
 @app.get("/api/organizations/{organization_id}/devices", response_model=DeviceInventoryResponse)
 def device_inventory(organization_id: str) -> DeviceInventoryResponse:
     try:
-        snapshots = saas_repo.list_endpoint_health(organization_id)
+        snapshots = saas_repo.list_endpoint_health(organization_id, expiry_seconds=settings.heartbeat_expiry_seconds)
     except TenantAccessError as exc:
         from fastapi import HTTPException
 

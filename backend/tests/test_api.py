@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from fastapi.testclient import TestClient
 
+from backend.app.detector import FrameDetector
 from backend.app.main import app, detector
 from backend.app.schemas import Detection
 
@@ -21,7 +22,16 @@ def test_health_is_honest_about_phone_model() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["phone_model_loaded"] is False
+    assert response.json()["phone_model_note"] == "Phone detection runs in the browser through COCO-SSD."
+    assert response.json()["max_frame_bytes"] > 0
     assert "pipeline_metrics" in response.json()
+
+
+def test_readiness_checks_database() -> None:
+    response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["database"] == "reachable"
 
 
 def test_websocket_analyzes_real_image_without_fake_detection() -> None:
@@ -47,6 +57,16 @@ def test_detector_rejects_oversized_encoded_frame() -> None:
         websocket.send_json({"frame": base64.b64encode(b"x" * 2_000_001).decode(), "timestamp": 1000})
         result = websocket.receive_json()
     assert "maximum encoded size" in result["error"]
+
+
+def test_detector_frame_size_limit_is_configurable() -> None:
+    limited_detector = FrameDetector(max_frame_bytes=10)
+    try:
+        limited_detector.analyze(base64.b64encode(b"x" * 11).decode())
+    except ValueError as exc:
+        assert "maximum encoded size" in str(exc)
+    else:
+        raise AssertionError("expected oversized frame to be rejected")
 
 
 def test_backend_metrics_increment_for_processed_frame() -> None:

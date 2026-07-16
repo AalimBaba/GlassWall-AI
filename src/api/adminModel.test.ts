@@ -7,8 +7,22 @@ describe('admin console view models', () => {
     const config = getRuntimeConfig({ PROD: true, DEV: false })
     expect(config.controlPlaneConfigured).toBe(false)
     expect(config.apiBaseUrl).toBe('')
+    expect(config.wsBaseUrl).toBe('')
+    expect(config.backendWsUrl).toBe('')
     expect(JSON.stringify(config)).not.toContain('localhost')
     expect(JSON.stringify(config)).not.toContain('127.0.0.1')
+  })
+
+  it('derives the face-analysis websocket URL from the configured public WSS base URL', () => {
+    const config = getRuntimeConfig({
+      PROD: true,
+      DEV: false,
+      VITE_API_BASE_URL: 'https://glasswall-api.example.test/',
+      VITE_WS_BASE_URL: 'wss://glasswall-api.example.test/',
+    })
+    expect(config.apiBaseUrl).toBe('https://glasswall-api.example.test')
+    expect(config.wsBaseUrl).toBe('wss://glasswall-api.example.test')
+    expect(config.backendWsUrl).toBe('wss://glasswall-api.example.test/ws/analyze')
   })
 
   it('builds empty and populated overview metrics from API data', () => {

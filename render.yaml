@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: glasswall-ai-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: backend/Dockerfile
+    healthCheckPath: /ready
+    disk:
+      name: glasswall-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        value: sqlite:////data/glasswall.db
+      - key: ALLOWED_ORIGINS
+        value: https://aalimbaba.github.io
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MAX_FRAME_BYTES
+        value: "2000000"
+      - key: HEARTBEAT_EXPIRY_SECONDS
+        value: "60"

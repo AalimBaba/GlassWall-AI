@@ -138,7 +138,7 @@ export default function App() {
   const frameTimerRef = useRef<number | null>(null)
   const awaitingResultRef = useRef(false)
   const lastBackendStateRef = useRef<'SECURE' | 'WARNING' | 'LOCKDOWN'>('SECURE')
-  const backendUrl = import.meta.env.VITE_BACKEND_WS_URL || (import.meta.env.DEV ? 'ws://127.0.0.1:8000/ws/analyze' : '')
+  const backendUrl = runtimeConfig.backendWsUrl
   const adminOverview = useAdminOverview(runtimeConfig)
   const deviceInventory = useDevices(runtimeConfig)
   const currentSessionState = active?.mode === 'Lockdown' ? 'LOCKDOWN' : active?.mode === 'Warning' ? 'WARNING' : cameraState === 'error' ? 'MONITORING_INTERRUPTED' : 'SECURE'

@@ -9,8 +9,8 @@ GlassWall AI protects sensitive dashboard content when an actual webcam frame co
 ## Deployment reality
 
 - **GitHub Pages:** runs the full React UI, webcam preview, real browser-side phone inference, phone bounding boxes, temporal phone validation, DLP blur/lockdown, recovery, audit log, and manual simulation.
-- **Local full system:** adds FastAPI WebSocket frame processing and OpenCV second-face detection.
-- GitHub Pages cannot host Python. On the live site, phone protection works independently while face protection is labeled offline/degraded unless a compatible secure backend is configured.
+- **Hosted or local FastAPI backend:** adds WebSocket frame processing, OpenCV second-face detection, endpoint heartbeats, device inventory, and admin overview APIs.
+- GitHub Pages cannot host Python. On the live site, phone protection works independently while face protection and Admin Console data are labeled offline/degraded unless a compatible HTTPS/WSS backend is configured.
 
 ## Real detection models
 
@@ -198,7 +198,7 @@ Environment variables:
 
 ```text
 VITE_API_BASE_URL=https://your-fastapi-backend.example.com
-VITE_BACKEND_WS_URL=wss://your-fastapi-backend.example.com/ws/analyze
+VITE_WS_BASE_URL=wss://your-fastapi-backend.example.com
 VITE_GLASSWALL_ORG_ID=<organization id>
 VITE_GLASSWALL_WORKSPACE_ID=<workspace id>
 VITE_GLASSWALL_DEVICE_ID=<device id>
@@ -207,7 +207,43 @@ VITE_HEARTBEAT_INTERVAL_MS=15000
 VITE_ADMIN_POLL_INTERVAL_MS=15000
 ```
 
+`VITE_BACKEND_WS_URL` remains supported as a legacy exact-path override, but `VITE_WS_BASE_URL` is preferred because the client derives `/ws/analyze` consistently and can switch from `ws://` in development to `wss://` in production.
+
 For local development, copy `.env.example` to `.env` and create matching development records through the repository layer or a future explicit seed command. The public GitHub Pages build intentionally does not include a localhost control-plane URL; without `VITE_API_BASE_URL`, the Admin Console reports that the backend is not configured while browser-side phone detection continues to work.
+
+## Hosted FastAPI backend deployment
+
+The repository includes a production Dockerfile at `backend/Dockerfile` and a Render blueprint at `render.yaml`. The default blueprint uses a small persistent disk mounted at `/data` and SQLite at `sqlite:////data/glasswall.db`, which is suitable for a low-cost prototype. For production scale, replace `DATABASE_URL` with managed PostgreSQL without changing the route layer.
+
+Required backend environment variables:
+
+```text
+DATABASE_URL=sqlite:////data/glasswall.db
+ALLOWED_ORIGINS=https://aalimbaba.github.io
+JWT_SECRET=<generated secret>
+ENVIRONMENT=production
+LOG_LEVEL=INFO
+MAX_FRAME_BYTES=2000000
+HEARTBEAT_EXPIRY_SECONDS=60
+```
+
+Render setup:
+
+1. Create a new Render Blueprint from this repository or create a Web Service using `backend/Dockerfile`.
+2. Keep `healthCheckPath` set to `/ready`; `/health` is a lightweight runtime status endpoint, while `/ready` verifies database reachability.
+3. Set `ALLOWED_ORIGINS` to the public Pages origin and any explicit preview origins you trust.
+4. After Render provides an HTTPS URL, configure GitHub repository variables:
+
+```text
+VITE_API_BASE_URL=https://<render-service>.onrender.com
+VITE_WS_BASE_URL=wss://<render-service>.onrender.com
+VITE_GLASSWALL_ORG_ID=<organization id>
+VITE_GLASSWALL_WORKSPACE_ID=<workspace id>
+VITE_GLASSWALL_DEVICE_ID=<device id>
+VITE_GLASSWALL_SESSION_ID=<endpoint session id>
+```
+
+The GitHub Pages workflow passes these repository variables into the production Vite build. If they are not set, the public frontend remains usable for browser-side phone detection and shows honest backend-unavailable states for Admin Console and face detection.
 
 ```mermaid
 flowchart TB
@@ -280,9 +316,10 @@ In a second terminal:
 npm run dev
 ```
 
-In development, the frontend defaults to `ws://127.0.0.1:8000/ws/analyze`. In production, no insecure localhost WebSocket is bundled. Set `VITE_BACKEND_WS_URL=wss://<hosted-backend>/ws/analyze` when a hosted backend exists. Without that variable, the Pages app reports the face backend as unavailable while browser-side phone protection continues working.
+In development, the frontend derives `ws://127.0.0.1:8000/ws/analyze` from `VITE_WS_BASE_URL` or its safe dev fallback. In production, no insecure localhost WebSocket is bundled. Set `VITE_WS_BASE_URL=wss://<hosted-backend>` when a hosted backend exists. Without that variable, the Pages app reports the face backend as unavailable while browser-side phone protection continues working.
 
 Health endpoint: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health).
+Readiness endpoint: [http://127.0.0.1:8000/ready](http://127.0.0.1:8000/ready).
 
 Initial SaaS APIs:
 
