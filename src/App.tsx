@@ -6,6 +6,12 @@ import {
   Terminal, TriangleAlert, UserRoundX, Users, Workflow, X, Zap
 } from 'lucide-react'
 import type { DetectedObject, ObjectDetection } from '@tensorflow-models/coco-ssd'
+import { buildOverviewMetrics, formatReported, healthTone, riskLabel } from './api/adminModel'
+import { getRuntimeConfig } from './api/config'
+import type { DeviceInventoryItem, EndpointHealth } from './api/types'
+import { useAdminOverview } from './hooks/useAdminOverview'
+import { useDevices } from './hooks/useDevices'
+import { useEndpointHeartbeat } from './hooks/useEndpointHeartbeat'
 import { PHONE_POLICY, PhoneThreatTracker, type PhoneTrackerSnapshot } from './phoneThreatTracker'
 
 type Threat = { mode: 'Warning' | 'Lockdown'; reason: string; detail: string; confidence: number; action: string; icon: typeof Smartphone }
@@ -14,6 +20,7 @@ type DetectionMode = 'real' | 'simulation'
 type CameraState = 'off' | 'requesting' | 'scanning' | 'error'
 type BackendState = 'connecting' | 'connected' | 'offline'
 type ModelState = 'loading' | 'ready' | 'error'
+type AppView = 'overview' | 'endpoint' | 'devices' | 'incidents' | 'policies' | 'analytics' | 'settings'
 type BackendDetection = { type: 'FACE' | 'PHONE' | 'CAMERA'; confidence: number; bbox: [number, number, number, number] }
 type AnalysisResult = { state: 'SECURE' | 'WARNING' | 'LOCKDOWN'; detections: BackendDetection[]; faces_count: number; phone_detected: boolean; threat_reason: string | null; action: 'NONE' | 'BLUR' | 'LOCKDOWN'; timestamp: number; phone_model_loaded: boolean; error?: string }
 
@@ -21,6 +28,17 @@ const LINKS = {
   github: 'https://github.com/AalimBaba/GlassWall-AI',
   portfolio: 'https://yourportfolio.example.com',
 }
+
+const runtimeConfig = getRuntimeConfig()
+const viewLabels: [AppView, string][] = [
+  ['overview', 'Overview'],
+  ['endpoint', 'Endpoint Protection'],
+  ['devices', 'Devices'],
+  ['incidents', 'Incidents'],
+  ['policies', 'Policies'],
+  ['analytics', 'Analytics'],
+  ['settings', 'Settings'],
+]
 
 const threats: Record<string, Threat> = {
   phone: { mode: 'Warning', reason: 'Simulated phone threat', detail: 'User manually triggered a phone-camera scenario.', confidence: 90, action: 'Privacy blur enabled', icon: Smartphone },
@@ -47,6 +65,12 @@ const modules = [
 ]
 
 function now() { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }
+function formatTime(value: Date | string | null | undefined) {
+  if (!value) return 'Not reported'
+  const date = typeof value === 'string' ? new Date(value) : value
+  if (Number.isNaN(date.getTime())) return 'Not reported'
+  return date.toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
 
 let phoneModelPromise: Promise<ObjectDetection> | null = null
 function getPhoneModel() {
@@ -58,6 +82,8 @@ function getPhoneModel() {
 }
 
 export default function App() {
+  const [appView, setAppView] = useState<AppView>('overview')
+  const [selectedDevice, setSelectedDevice] = useState<DeviceInventoryItem | null>(null)
   const [active, setActive] = useState<Threat | null>(null)
   const [events, setEvents] = useState<Event[]>([{ id: 1, title: 'Session initialized', time: now(), action: 'Secure — no active threat', mode: 'Secure' }])
   const [menu, setMenu] = useState(false)
@@ -72,6 +98,8 @@ export default function App() {
   const [phoneSnapshot, setPhoneSnapshot] = useState<PhoneTrackerSnapshot>({ state: 'SECURE', durationMs: 0, confidence: 0, confirmed: false })
   const [backendAnalysis, setBackendAnalysis] = useState<AnalysisResult | null>(null)
   const [inferenceFps, setInferenceFps] = useState(0)
+  const [inferenceLatencyMs, setInferenceLatencyMs] = useState(0)
+  const [lastDetectionTimestamp, setLastDetectionTimestamp] = useState<number | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -87,6 +115,20 @@ export default function App() {
   const awaitingResultRef = useRef(false)
   const lastBackendStateRef = useRef<'SECURE' | 'WARNING' | 'LOCKDOWN'>('SECURE')
   const backendUrl = import.meta.env.VITE_BACKEND_WS_URL || (import.meta.env.DEV ? 'ws://127.0.0.1:8000/ws/analyze' : '')
+  const adminOverview = useAdminOverview(runtimeConfig)
+  const deviceInventory = useDevices(runtimeConfig)
+  const currentSessionState = active?.mode === 'Lockdown' ? 'LOCKDOWN' : active?.mode === 'Warning' ? 'WARNING' : cameraState === 'error' ? 'MONITORING_INTERRUPTED' : 'SECURE'
+  const latestRiskScore = active?.mode === 'Lockdown' ? Math.max(80, active.confidence) : active?.mode === 'Warning' ? Math.max(60, active.confidence) : Math.min(29, Math.round(Math.max(0, phoneSnapshot.confidence) * 100))
+  const heartbeatStatus = useEndpointHeartbeat(runtimeConfig, {
+    state: currentSessionState,
+    cameraPermission: cameraState === 'scanning',
+    backendConnected: backendState === 'connected',
+    modelLoaded: phoneModelState === 'ready',
+    inferenceLatencyMs,
+    latestRiskScore,
+    lastDetectionTimestamp,
+    enabled: detectionMode === 'real' && cameraState === 'scanning',
+  })
 
   const simulate = (key: keyof typeof threats) => {
     if (detectionMode !== 'simulation') return
@@ -100,6 +142,7 @@ export default function App() {
     setDetections([])
     setPhoneDetections([])
     setPhoneSnapshot(phoneTrackerRef.current.reset())
+    setLastDetectionTimestamp(null)
     phoneLastStateRef.current = 'SECURE'
     phoneProtectionRef.current = null
     lastBackendStateRef.current = 'SECURE'
@@ -119,6 +162,7 @@ export default function App() {
     setDetections([])
     setPhoneDetections([])
     setPhoneSnapshot(phoneTrackerRef.current.reset())
+    setLastDetectionTimestamp(null)
     phoneProtectionRef.current = null
   }
 
@@ -138,9 +182,11 @@ export default function App() {
       const snapshot = phoneTrackerRef.current.update(phones.length > 0, highest, timestamp)
       setPhoneSnapshot(snapshot)
       const elapsed = performance.now() - startedAt
+      setInferenceLatencyMs(Math.round(elapsed))
       const sinceLast = phoneLastFrameAtRef.current ? startedAt - phoneLastFrameAtRef.current : elapsed
       phoneLastFrameAtRef.current = startedAt
       setInferenceFps(Math.round(10000 / Math.max(elapsed, sinceLast)) / 10)
+      if (phones.length > 0) setLastDetectionTimestamp(timestamp)
 
       if (snapshot.state === 'WARNING') phoneProtectionRef.current = 'Warning'
       if (snapshot.state === 'LOCKDOWN') phoneProtectionRef.current = 'Lockdown'
@@ -214,6 +260,7 @@ export default function App() {
       try { result = JSON.parse(event.data) as AnalysisResult } catch { return }
       if (result.error) { setCameraMessage(`Backend rejected frame: ${result.error}`); return }
       setDetections(result.detections)
+      if (result.detections.length > 0) setLastDetectionTimestamp(result.timestamp)
       setBackendAnalysis(result)
       const faceText = `${result.faces_count} face${result.faces_count === 1 ? '' : 's'} visible`
       if (result.state === 'SECURE') {
@@ -286,7 +333,7 @@ export default function App() {
       <nav className="nav shell">
         <a className="brand" href="#top" aria-label="GlassWall AI home"><span className="brand-mark"><Shield size={19}/></span><span>GLASSWALL <b>AI</b></span></a>
         <div className={menu ? 'nav-links open' : 'nav-links'}>
-          {['Demo', 'About', 'Architecture', 'Technology'].map(x => <a key={x} href={`#${x.toLowerCase()}`} onClick={() => setMenu(false)}>{x}</a>)}
+          {viewLabels.map(([view, label]) => <button key={view} className={appView === view ? 'active' : ''} onClick={() => { setAppView(view); setMenu(false); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>{label}</button>)}
         </div>
         <a className="nav-cta desktop" href={LINKS.github} target="_blank" rel="noreferrer"><Code2 size={15}/> View source</a>
         <button className="menu" onClick={() => setMenu(!menu)} aria-label="Toggle navigation">{menu ? <X/> : <Menu/>}</button>
@@ -301,8 +348,8 @@ export default function App() {
           <h1>The last line of defense is <em>what’s on screen.</em></h1>
           <p>GlassWall AI streams webcam frames to a local FastAPI + OpenCV pipeline, verifies persistent second-observer risk, and protects sensitive interfaces in real time.</p>
           <div className="hero-actions">
-            <a className="button primary" href="#demo"><Zap size={17}/> Launch live demo</a>
-            <a className="button secondary" href="#architecture">View architecture <ArrowRight size={17}/></a>
+            <button className="button primary" onClick={() => setAppView('endpoint')}><Zap size={17}/> Launch live demo</button>
+            <button className="button secondary" onClick={() => setAppView('overview')}>View architecture <ArrowRight size={17}/></button>
           </div>
           <div className="hero-proof">
             <span><Check/> Real OpenCV faces</span><span><Check/> Temporal state engine</span><span><Check/> Honest simulation fallback</span>
@@ -321,7 +368,11 @@ export default function App() {
 
       <section className="trust-strip"><div className="shell"><span>ENGINEERED FOR</span><b>FINANCIAL SERVICES</b><i/><b>HEALTHCARE</b><i/><b>DEFENSE</b><i/><b>SECURE REMOTE WORK</b></div></section>
 
-      <section className="section shell" id="demo">
+      {appView === 'overview' && <AdminOverviewSurface overview={adminOverview.data} devices={deviceInventory.devices} loading={adminOverview.loading || deviceInventory.loading} error={adminOverview.error || deviceInventory.error} lastUpdatedAt={adminOverview.lastUpdatedAt || deviceInventory.lastUpdatedAt} configReady={runtimeConfig.controlPlaneConfigured} onRefresh={() => { void adminOverview.refresh(); void deviceInventory.refresh() }} onOpenEndpoint={() => setAppView('endpoint')} onOpenDevices={() => setAppView('devices')} />}
+      {appView === 'devices' && <DevicesSurface devices={deviceInventory.devices} loading={deviceInventory.loading} error={deviceInventory.error} lastUpdatedAt={deviceInventory.lastUpdatedAt} configReady={runtimeConfig.controlPlaneConfigured} organizationId={runtimeConfig.organizationId} selectedDevice={selectedDevice} onSelectDevice={setSelectedDevice} onRefresh={() => void deviceInventory.refresh()} onOpenEndpoint={() => setAppView('endpoint')} />}
+      {['incidents', 'policies', 'analytics', 'settings'].includes(appView) && <PlaceholderSurface view={appView} onOpenEndpoint={() => setAppView('endpoint')} />}
+
+      {appView === 'endpoint' && <section className="section shell" id="demo">
         <SectionHead kicker="INTERACTIVE PROTOTYPE" title="Put the dashboard under pressure." text="Choose an explicit simulation or opt in to experimental, browser-side object detection. Nothing triggers automatically at startup." />
         <div className="mode-panel">
           <div><span>DETECTION MODE</span><b>{detectionMode === 'simulation' ? 'Simulation Mode — manual triggers only' : 'Real Camera Mode'}</b><small>{detectionMode === 'simulation' ? 'No camera or automatic analysis.' : `${operationalState}. Browser phone detector ${phoneModelState}; face backend ${backendState}.`}</small></div>
@@ -388,16 +439,16 @@ export default function App() {
           <div className="log-head"><div><Radio/><span><b>Security event stream</b><small>SESSION LEDGER · LOCAL</small></span></div><span className="connected"><i/> MONITORING</span></div>
           {events.length === 0 ? <div className="empty-log"><ShieldCheck/><div><b>No threats in this session</b><span>Use the simulator or camera assist to generate a verified event.</span></div></div> : <div className="log-rows">{events.map(e => <div className="log-row" key={e.id}><span className={`event-severity ${e.mode.toLowerCase()}`}>{e.mode}</span><div><b>{e.title}</b><span>{e.action}</span></div><span>{e.confidence ? `${e.confidence}% confidence` : 'No detection'}</span><time>{e.time}</time></div>)}</div>}
         </div>
-      </section>
+      </section>}
 
-      <section className="section about-section" id="about"><div className="shell about-grid">
+      {appView === 'overview' && <section className="section about-section" id="about"><div className="shell about-grid">
         <div className="about-visual"><div className="glass-layers"><div className="layer l1"/><div className="layer l2"/><div className="layer l3"><Shield size={60}/></div></div><div className="stat-card top"><b>&lt;40ms</b><span>target response latency</span></div><div className="stat-card bottom"><b>3</b><span>implemented reasoning engines</span></div></div>
         <div><div className="kicker">THE ANALOG GAP</div><h2>Security shouldn’t stop at the edge of the screen.</h2><p className="lead">GlassWall AI combines browser-side COCO-SSD phone detection with local FastAPI/OpenCV face counting and temporal threat evaluation.</p><p>Traditional DLP watches files, networks, and endpoints. GlassWall focuses on what happens after sensitive data is rendered: unauthorized observers and physical capture risks.</p><div className="honesty"><ShieldCheck/><div><b>Real inference, explicit limitations</b><span>GitHub Pages runs real phone detection locally in the browser. The optional FastAPI service adds OpenCV second-face detection when run on the same machine. Simulation remains isolated and manual.</span></div></div></div>
-      </div></section>
+      </div></section>}
 
-      <section className="section shell" id="architecture"><SectionHead kicker="SYSTEM ARCHITECTURE" title="Working modules, clearly separated." text="The local system streams compressed webcam frames to FastAPI, runs real OpenCV face analysis, applies temporal policy, and returns an auditable UI state." />
+      {appView === 'overview' && <section className="section shell" id="architecture"><SectionHead kicker="SYSTEM ARCHITECTURE" title="Working modules, clearly separated." text="The local system streams compressed webcam frames to FastAPI, runs real OpenCV face analysis, applies temporal policy, and returns an auditable UI state." />
         <div className="module-grid">{modules.map(([num, title, text, status]) => <article className="module-card" key={num}><div className="module-num">{num}</div><div><h3>{title}</h3><p>{text}</p><span className={status.startsWith('Implemented') ? 'tag implemented' : 'tag planned'}>{status}</span></div></article>)}</div>
-      </section>
+      </section>}
 
       <section className="section dark-section"><div className="shell"><SectionHead kicker="CAPABILITIES" title="Security engineering you can interact with." text="The portfolio demo makes a complex threat model legible without pretending simulation is production inference." /><div className="feature-grid">{features.map((item) => { const title = item[0] as string; const text = item[1] as string; const Icon = item[2] as typeof Shield; return <article className="feature-card" key={title}><div className="feature-icon"><Icon/></div><h3>{title}</h3><p>{text}</p><ArrowRight/></article> })}</div></div></section>
 
@@ -417,6 +468,72 @@ export default function App() {
 }
 
 function SectionHead({ kicker, title, text }: { kicker: string; title: string; text: string }) { return <div className="section-head"><div className="kicker">{kicker}</div><h2>{title}</h2><p>{text}</p></div> }
+function AdminOverviewSurface({ overview, devices, loading, error, lastUpdatedAt, configReady, onRefresh, onOpenEndpoint, onOpenDevices }: { overview: ReturnType<typeof useAdminOverview>['data']; devices: DeviceInventoryItem[]; loading: boolean; error: string; lastUpdatedAt: Date | null; configReady: boolean; onRefresh: () => void; onOpenEndpoint: () => void; onOpenDevices: () => void }) {
+  const metrics = buildOverviewMetrics(overview)
+  return <section className="section shell admin-surface">
+    <div className="admin-head"><div><div className="kicker">SECURITY ADMIN CONSOLE</div><h2>Live tenant security posture</h2><p>Counts are loaded from the FastAPI control-plane APIs. No random endpoint activity or generated alerts are shown here.</p></div><div className="admin-actions"><span>Last updated: {formatTime(lastUpdatedAt)}</span><button onClick={onRefresh}><RefreshCw/> Refresh</button></div></div>
+    {!configReady && <ControlPlaneEmpty onOpenEndpoint={onOpenEndpoint} onRefresh={onRefresh}/>}
+    {configReady && error && <div className="admin-error"><TriangleAlert/><div><b>Control-plane request failed</b><span>{error}</span></div><button onClick={onRefresh}>Retry</button></div>}
+    {configReady && <div className="admin-metrics">{metrics.map(metric => <div className={`admin-metric ${metric.tone}`} key={metric.label}><span>{metric.label}</span><b>{loading ? '…' : metric.value}</b></div>)}</div>}
+    {configReady && !loading && devices.length === 0 && <EmptyEndpoints onOpenEndpoint={onOpenEndpoint} onRefresh={onRefresh}/>}
+    {configReady && devices.length > 0 && <div className="admin-panel"><div className="panel-title"><div><b>Active endpoint posture</b><span>{devices.length} registered endpoint session{devices.length === 1 ? '' : 's'}</span></div><button onClick={onOpenDevices}>Open Devices</button></div><div className="mini-device-list">{devices.slice(0, 4).map(device => <div key={device.session_id}><span className={`health-dot ${healthTone(device.health)}`}/><b>{device.device_name || device.device_id}</b><small>{device.health} · {device.state} · Risk {device.latest_risk_score}</small></div>)}</div></div>}
+  </section>
+}
+
+function DevicesSurface({ devices, loading, error, lastUpdatedAt, configReady, organizationId, selectedDevice, onSelectDevice, onRefresh, onOpenEndpoint }: { devices: DeviceInventoryItem[]; loading: boolean; error: string; lastUpdatedAt: Date | null; configReady: boolean; organizationId: string; selectedDevice: DeviceInventoryItem | null; onSelectDevice: (device: DeviceInventoryItem | null) => void; onRefresh: () => void; onOpenEndpoint: () => void }) {
+  return <section className="section shell admin-surface">
+    <div className="admin-head"><div><div className="kicker">ENDPOINT INVENTORY</div><h2>Registered devices</h2><p>Endpoint rows come from stored heartbeat records in organization <code>{organizationId || 'Not configured'}</code>.</p></div><div className="admin-actions"><span>Last updated: {formatTime(lastUpdatedAt)}</span><button onClick={onRefresh}><RefreshCw/> Refresh</button></div></div>
+    {!configReady && <ControlPlaneEmpty onOpenEndpoint={onOpenEndpoint} onRefresh={onRefresh}/>}
+    {configReady && error && <div className="admin-error"><TriangleAlert/><div><b>Unable to load devices</b><span>{error}</span></div><button onClick={onRefresh}>Retry</button></div>}
+    {configReady && !loading && devices.length === 0 && <EmptyEndpoints onOpenEndpoint={onOpenEndpoint} onRefresh={onRefresh}/>}
+    {configReady && devices.length > 0 && <div className="device-table-wrap"><table className="device-table"><thead><tr><th>Device</th><th>Workspace</th><th>Current State</th><th>Endpoint Health</th><th>Risk Score</th><th>Camera</th><th>Phone Model</th><th>Backend</th><th>Last Heartbeat</th><th>Latest Detection</th><th>Actions</th></tr></thead><tbody>{devices.map(device => <tr key={device.session_id}><td><b>{device.device_name || device.device_id}</b><small>{device.device_id}</small></td><td>{device.workspace_name || device.workspace_id}</td><td><StatusBadge value={device.state}/></td><td><HealthBadge value={device.health}/></td><td><b>{device.latest_risk_score}</b><small>{riskLabel(device.latest_risk_score)}</small></td><td>{formatReported(device.camera_permission)}</td><td>{formatReported(device.model_loaded)}</td><td>{formatReported(device.backend_connected)}</td><td>{formatTime(device.last_heartbeat_at)}</td><td>{formatTime(device.last_detection_at)}</td><td><div className="row-actions"><button onClick={() => onSelectDevice(device)}>View Details</button><button onClick={onOpenEndpoint}>Open Endpoint Session</button><button onClick={onRefresh}>Refresh</button></div></td></tr>)}</tbody></table></div>}
+    {selectedDevice && <DeviceDetailsDrawer device={selectedDevice} organizationId={organizationId} onClose={() => onSelectDevice(null)}/>}
+  </section>
+}
+
+function DeviceDetailsDrawer({ device, organizationId, onClose }: { device: DeviceInventoryItem; organizationId: string; onClose: () => void }) {
+  const fields = [
+    ['Device identifier', device.device_id],
+    ['Organization identifier', organizationId],
+    ['Workspace', device.workspace_name || device.workspace_id],
+    ['Current state', device.state],
+    ['Current risk score', device.latest_risk_score],
+    ['Risk-level label', riskLabel(device.latest_risk_score)],
+    ['Camera permission status', formatReported(device.camera_permission)],
+    ['Phone-model status', formatReported(device.model_loaded)],
+    ['Face-backend status', formatReported(device.backend_connected)],
+    ['Inference latency', `${device.inference_latency_ms} ms`],
+    ['Last detection time', formatTime(device.last_detection_at)],
+    ['Last heartbeat', formatTime(device.last_heartbeat_at)],
+    ['Application version', device.application_version],
+    ['Latest threat reason', 'Not reported'],
+    ['Current remediation state', device.state === 'LOCKDOWN' ? 'Workspace protection active' : 'Not reported'],
+  ]
+  return <div className="drawer-backdrop" role="dialog" aria-modal="true"><aside className="device-drawer"><div className="drawer-head"><div><span>DEVICE DETAILS</span><h3>{device.device_name || device.device_id}</h3></div><button onClick={onClose} aria-label="Close device details"><X/></button></div><div className="detail-grid">{fields.map(([label, value]) => <div key={label}><span>{label}</span><b>{formatReported(value)}</b></div>)}</div></aside></div>
+}
+
+function StatusBadge({ value }: { value: string }) {
+  const tone = value === 'LOCKDOWN' ? 'danger' : value === 'WARNING' || value === 'MONITORING_INTERRUPTED' ? 'warning' : 'secure'
+  return <span className={`status-badge ${tone}`}>{value}</span>
+}
+
+function HealthBadge({ value }: { value: string }) {
+  return <span className={`status-badge ${healthTone(value as EndpointHealth)}`}>{value}</span>
+}
+
+function ControlPlaneEmpty({ onOpenEndpoint, onRefresh }: { onOpenEndpoint: () => void; onRefresh: () => void }) {
+  return <div className="admin-empty"><ShieldAlert/><div><b>Control-plane backend unavailable</b><span>The public GitHub Pages frontend can run browser-side phone detection, but the Admin Console requires a hosted or local FastAPI control-plane backend.</span></div><div><button onClick={onOpenEndpoint}>Open Endpoint Protection</button><button onClick={onRefresh}>Refresh</button></div></div>
+}
+
+function EmptyEndpoints({ onOpenEndpoint, onRefresh }: { onOpenEndpoint: () => void; onRefresh: () => void }) {
+  return <div className="admin-empty"><Users/><div><b>No endpoints registered</b><span>Start the Endpoint Protection client with the control-plane backend configured. Registered devices and live security posture will appear here.</span></div><div><button onClick={onOpenEndpoint}>Open Endpoint Protection</button><button onClick={() => document.getElementById('technology')?.scrollIntoView({ behavior: 'smooth' })}>View Local Setup</button><button onClick={onRefresh}>Refresh</button></div></div>
+}
+
+function PlaceholderSurface({ view, onOpenEndpoint }: { view: AppView; onOpenEndpoint: () => void }) {
+  const title = view[0].toUpperCase() + view.slice(1)
+  return <section className="section shell admin-surface"><div className="admin-empty"><Blocks/><div><b>{title} not yet configured</b><span>This SaaS surface will be connected in a future tested slice. No sample incidents, policies, or analytics are being fabricated.</span></div><div><button onClick={onOpenEndpoint}>Open Endpoint Protection</button></div></div></section>
+}
+
 function CardTitle({ title, tag }: { title: string; tag: string }) { return <div className="card-title"><b>{title}</b><span>{tag}</span></div> }
 function Metric({ label, value, trend, icon: Icon }: { label: string; value: string; trend: string; icon: typeof Shield }) { return <div className="metric"><div><span>{label}</span><b>{value}</b><small>{trend}</small></div><Icon/></div> }
 function Tech({ title, icon: Icon, status, items }: { title: string; icon: typeof Shield; status: string; items: string[] }) { return <article className="tech-card"><div className="tech-top"><div><Icon/><h3>{title}</h3></div><span className={status === 'IMPLEMENTED' ? 'implemented' : ''}>{status}</span></div><ul>{items.map(x => <li key={x}><Check/>{x}</li>)}</ul></article> }

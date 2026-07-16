@@ -46,10 +46,17 @@ class HeartbeatInput:
 class EndpointHealthSnapshot:
     session_id: str
     workspace_id: str
+    workspace_name: str | None
     device_id: str
+    device_name: str | None
     state: str
     health: EndpointHealth
     latest_risk_score: int
+    camera_permission: bool
+    backend_connected: bool
+    model_loaded: bool
+    inference_latency_ms: int
+    last_detection_at: datetime | None
     last_heartbeat_at: datetime | None
     application_version: str
 
@@ -147,10 +154,20 @@ class SaaSRepository:
     ) -> list[EndpointHealthSnapshot]:
         now = at or datetime.now(timezone.utc)
         with self.session_scope() as session:
+            if session.get(Organization, organization_id) is None:
+                raise TenantAccessError("Organization is not available")
             endpoints = session.scalars(
                 select(EndpointSession).where(EndpointSession.organization_id == organization_id)
             ).all()
-            return [self._health_for(item, now, expiry_seconds) for item in endpoints]
+            workspaces = {
+                item.id: item.name
+                for item in session.scalars(select(Workspace).where(Workspace.organization_id == organization_id)).all()
+            }
+            devices = {
+                item.id: item.display_name
+                for item in session.scalars(select(Device).where(Device.organization_id == organization_id)).all()
+            }
+            return [self._health_for(item, now, expiry_seconds, workspaces.get(item.workspace_id), devices.get(item.device_id)) for item in endpoints]
 
     def create_incident(
         self,
@@ -232,44 +249,67 @@ class SaaSRepository:
             return zone
 
     def admin_overview(self, organization_id: str, at: datetime | None = None) -> dict[str, object]:
+        with self.session_scope() as session:
+            if session.get(Organization, organization_id) is None:
+                raise TenantAccessError("Organization is not available")
         endpoints = self.list_endpoint_health(organization_id, at=at)
         incidents = self.list_incidents(organization_id)
         health_counts = {item.value: 0 for item in EndpointHealth}
+        state_counts = {"SECURE": 0, "WARNING": 0, "LOCKDOWN": 0}
         for endpoint in endpoints:
             health_counts[endpoint.health.value] += 1
+            if endpoint.state in state_counts:
+                state_counts[endpoint.state] += 1
         open_incidents = sum(1 for item in incidents if item.status in {"OPEN", "INVESTIGATING"})
         return {
             "organization_id": organization_id,
             "endpoint_count": len(endpoints),
             "health_counts": health_counts,
+            "state_counts": state_counts,
             "incident_count": len(incidents),
             "open_incident_count": open_incidents,
             "sample_data": False,
         }
 
     @staticmethod
-    def _health_for(endpoint: EndpointSession, now: datetime, expiry_seconds: int = 60) -> EndpointHealthSnapshot:
+    def _health_for(
+        endpoint: EndpointSession,
+        now: datetime,
+        expiry_seconds: int = 60,
+        workspace_name: str | None = None,
+        device_name: str | None = None,
+    ) -> EndpointHealthSnapshot:
         last_seen = endpoint.last_heartbeat_at
         if last_seen is not None and last_seen.tzinfo is None:
             last_seen = last_seen.replace(tzinfo=timezone.utc)
+        last_detection = endpoint.last_detection_at
+        if last_detection is not None and last_detection.tzinfo is None:
+            last_detection = last_detection.replace(tzinfo=timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         if last_seen is None or now - last_seen > timedelta(seconds=expiry_seconds):
             health = EndpointHealth.OFFLINE
-        elif endpoint.state == "MONITORING_INTERRUPTED" or not endpoint.camera_permission:
+        elif endpoint.state == "MONITORING_INTERRUPTED" or not endpoint.camera_permission or not endpoint.model_loaded:
             health = EndpointHealth.MONITORING_INTERRUPTED
-        elif not endpoint.backend_connected or not endpoint.model_loaded:
+        elif not endpoint.backend_connected:
             health = EndpointHealth.DEGRADED
         else:
             health = EndpointHealth.ONLINE
         return EndpointHealthSnapshot(
             session_id=endpoint.id,
             workspace_id=endpoint.workspace_id,
+            workspace_name=workspace_name,
             device_id=endpoint.device_id,
+            device_name=device_name,
             state=endpoint.state,
             health=health,
             latest_risk_score=endpoint.latest_risk_score,
-            last_heartbeat_at=endpoint.last_heartbeat_at,
+            camera_permission=endpoint.camera_permission,
+            backend_connected=endpoint.backend_connected,
+            model_loaded=endpoint.model_loaded,
+            inference_latency_ms=endpoint.inference_latency_ms,
+            last_detection_at=last_detection,
+            last_heartbeat_at=last_seen,
             application_version=endpoint.application_version,
         )
 

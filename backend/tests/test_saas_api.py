@@ -48,3 +48,20 @@ def test_heartbeat_api_and_admin_overview_are_real_stored_state() -> None:
     assert body["sample_data"] is False
     assert body["endpoint_count"] == 1
     assert body["health_counts"]["Degraded"] == 1
+    assert body["state_counts"]["SECURE"] == 1
+
+    devices = client.get(f"/api/organizations/{org.id}/devices")
+    assert devices.status_code == 200
+    device_rows = devices.json()["devices"]
+    assert len(device_rows) == 1
+    assert device_rows[0]["device_name"] == "Browser Endpoint"
+    assert device_rows[0]["workspace_name"] == "Cleanroom"
+    assert device_rows[0]["backend_connected"] is False
+
+
+def test_invalid_organization_returns_safe_404() -> None:
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    response = client.get("/api/organizations/not-real/admin/overview")
+    assert response.status_code == 404

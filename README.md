@@ -115,6 +115,41 @@ The backend now includes the first multi-tenant SaaS foundation:
 - admin overview data derived from stored endpoint and incident records, with `sample_data: false` unless explicitly seeded in a future demo workspace;
 - deterministic adaptive risk scoring with explainable factor contributions, configurable weights, decay, hysteresis, and a guard against single-frame Lockdown.
 
+## Admin Console
+
+The React frontend now has separate product surfaces for **Overview**, **Endpoint Protection**, and **Devices**. The Admin Console is data-driven:
+
+- Overview cards show total devices, online/degraded/offline devices, secure/warning/lockdown sessions, and open incidents from `GET /api/organizations/{organization_id}/admin/overview`.
+- Devices shows endpoint inventory from `GET /api/organizations/{organization_id}/devices`.
+- Device details show the stored organization, workspace, endpoint/session IDs, health, risk score, component status, inference latency, heartbeat time, and latest detection time.
+- Empty-state and backend-unconfigured screens are shown when there is no real control-plane data.
+- Incidents, Policies, Analytics, and Settings are intentionally labeled as not yet configured; no fake live activity is generated.
+
+Endpoint Protection sends heartbeats only when a control-plane backend and endpoint identity are configured. Heartbeats include real browser/client values: session state, camera permission, phone-model readiness, backend connectivity, latest risk score, latest detection timestamp, inference latency, and application version. Heartbeat failures never stop browser-side phone detection.
+
+```text
+Endpoint Protection Client
+  → Heartbeat API
+  → Tenant Repository
+  → Admin Overview API / Devices API
+  → Admin Console
+```
+
+Environment variables:
+
+```text
+VITE_API_BASE_URL=https://your-fastapi-backend.example.com
+VITE_BACKEND_WS_URL=wss://your-fastapi-backend.example.com/ws/analyze
+VITE_GLASSWALL_ORG_ID=<organization id>
+VITE_GLASSWALL_WORKSPACE_ID=<workspace id>
+VITE_GLASSWALL_DEVICE_ID=<device id>
+VITE_GLASSWALL_SESSION_ID=<endpoint session id>
+VITE_HEARTBEAT_INTERVAL_MS=15000
+VITE_ADMIN_POLL_INTERVAL_MS=15000
+```
+
+For local development, copy `.env.example` to `.env` and create matching development records through the repository layer or a future explicit seed command. The public GitHub Pages build intentionally does not include a localhost control-plane URL; without `VITE_API_BASE_URL`, the Admin Console reports that the backend is not configured while browser-side phone detection continues to work.
+
 ```mermaid
 flowchart TB
   Org["Organization"] --> Workspace["Workspace"]

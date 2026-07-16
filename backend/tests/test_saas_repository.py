@@ -74,6 +74,54 @@ def test_heartbeat_health_and_expiry(repo: SaaSRepository) -> None:
     assert expired[0].health is EndpointHealth.OFFLINE
 
 
+def test_heartbeat_update_and_degraded_status(repo: SaaSRepository) -> None:
+    org, workspace, device, session = make_endpoint(repo)
+    now = datetime(2026, 7, 16, tzinfo=timezone.utc)
+
+    degraded = repo.record_heartbeat(
+        org,
+        HeartbeatInput(
+            session_id=session,
+            workspace_id=workspace,
+            device_id=device,
+            user_id=None,
+            session_state="WARNING",
+            camera_permission=True,
+            backend_connected=False,
+            model_loaded=True,
+            inference_latency_ms=50,
+            latest_risk_score=64,
+            last_detection_at=now,
+            application_version="1.0.1",
+        ),
+        at=now,
+    )
+    assert degraded.health is EndpointHealth.DEGRADED
+    assert degraded.state == "WARNING"
+    assert degraded.latest_risk_score == 64
+
+    interrupted = repo.record_heartbeat(
+        org,
+        HeartbeatInput(
+            session_id=session,
+            workspace_id=workspace,
+            device_id=device,
+            user_id=None,
+            session_state="MONITORING_INTERRUPTED",
+            camera_permission=False,
+            backend_connected=True,
+            model_loaded=True,
+            inference_latency_ms=10,
+            latest_risk_score=55,
+            last_detection_at=None,
+            application_version="1.0.2",
+        ),
+        at=now + timedelta(seconds=5),
+    )
+    assert interrupted.health is EndpointHealth.MONITORING_INTERRUPTED
+    assert interrupted.application_version == "1.0.2"
+
+
 def test_incident_and_timeline_are_tenant_scoped(repo: SaaSRepository) -> None:
     org, workspace, device, session = make_endpoint(repo)
     other_org, *_ = make_endpoint(repo, "other")
@@ -86,3 +134,17 @@ def test_incident_and_timeline_are_tenant_scoped(repo: SaaSRepository) -> None:
 
     with pytest.raises(TenantAccessError):
         repo.add_incident_event(other_org, incident.id, "bad_read", "Should not cross tenants.")
+
+
+def test_zero_state_overview_and_invalid_org(repo: SaaSRepository) -> None:
+    org = repo.create_organization("Empty Tenant", "empty")
+    overview = repo.admin_overview(org.id)
+    assert overview["endpoint_count"] == 0
+    assert overview["open_incident_count"] == 0
+    assert overview["state_counts"] == {"SECURE": 0, "WARNING": 0, "LOCKDOWN": 0}
+
+    with pytest.raises(TenantAccessError):
+        repo.admin_overview("missing-org")
+
+    with pytest.raises(TenantAccessError):
+        repo.list_endpoint_health("missing-org")

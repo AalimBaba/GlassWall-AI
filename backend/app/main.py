@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .detector import FrameDetector, InvalidFrameError
 from .saas_repository import HeartbeatInput, SaaSRepository, TenantAccessError
-from .schemas import AdminOverviewResponse, EndpointHeartbeatRequest, EndpointHealthResponse
+from .schemas import AdminOverviewResponse, DeviceInventoryResponse, EndpointHeartbeatRequest, EndpointHealthResponse
 from .threat_engine import TemporalThreatEngine
 
 app = FastAPI(title="GlassWall AI Local Detection API", version="1.0.0")
@@ -69,10 +69,17 @@ def record_endpoint_heartbeat(organization_id: str, payload: EndpointHeartbeatRe
     return EndpointHealthResponse(
         session_id=snapshot.session_id,
         workspace_id=snapshot.workspace_id,
+        workspace_name=snapshot.workspace_name,
         device_id=snapshot.device_id,
+        device_name=snapshot.device_name,
         state=snapshot.state,
         health=snapshot.health.value,
         latest_risk_score=snapshot.latest_risk_score,
+        camera_permission=snapshot.camera_permission,
+        backend_connected=snapshot.backend_connected,
+        model_loaded=snapshot.model_loaded,
+        inference_latency_ms=snapshot.inference_latency_ms,
+        last_detection_at=snapshot.last_detection_at.isoformat() if snapshot.last_detection_at else None,
         last_heartbeat_at=snapshot.last_heartbeat_at.isoformat() if snapshot.last_heartbeat_at else None,
         application_version=snapshot.application_version,
     )
@@ -80,7 +87,45 @@ def record_endpoint_heartbeat(organization_id: str, payload: EndpointHeartbeatRe
 
 @app.get("/api/organizations/{organization_id}/admin/overview", response_model=AdminOverviewResponse)
 def admin_overview(organization_id: str) -> AdminOverviewResponse:
-    return AdminOverviewResponse(**saas_repo.admin_overview(organization_id))
+    try:
+        return AdminOverviewResponse(**saas_repo.admin_overview(organization_id))
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/organizations/{organization_id}/devices", response_model=DeviceInventoryResponse)
+def device_inventory(organization_id: str) -> DeviceInventoryResponse:
+    try:
+        snapshots = saas_repo.list_endpoint_health(organization_id)
+    except TenantAccessError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return DeviceInventoryResponse(
+        organization_id=organization_id,
+        devices=[
+            EndpointHealthResponse(
+                session_id=snapshot.session_id,
+                workspace_id=snapshot.workspace_id,
+                workspace_name=snapshot.workspace_name,
+                device_id=snapshot.device_id,
+                device_name=snapshot.device_name,
+                state=snapshot.state,
+                health=snapshot.health.value,
+                latest_risk_score=snapshot.latest_risk_score,
+                camera_permission=snapshot.camera_permission,
+                backend_connected=snapshot.backend_connected,
+                model_loaded=snapshot.model_loaded,
+                inference_latency_ms=snapshot.inference_latency_ms,
+                last_detection_at=snapshot.last_detection_at.isoformat() if snapshot.last_detection_at else None,
+                last_heartbeat_at=snapshot.last_heartbeat_at.isoformat() if snapshot.last_heartbeat_at else None,
+                application_version=snapshot.application_version,
+            )
+            for snapshot in snapshots
+        ],
+    )
 
 
 @app.websocket("/ws/analyze")

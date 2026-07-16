@@ -48,10 +48,17 @@ class EndpointHeartbeatRequest(BaseModel):
 class EndpointHealthResponse(BaseModel):
     session_id: str
     workspace_id: str
+    workspace_name: str | None = None
     device_id: str
+    device_name: str | None = None
     state: str
     health: str
     latest_risk_score: int
+    camera_permission: bool
+    backend_connected: bool
+    model_loaded: bool
+    inference_latency_ms: int
+    last_detection_at: str | None = None
     last_heartbeat_at: str | None
     application_version: str
 
@@ -60,6 +67,13 @@ class AdminOverviewResponse(BaseModel):
     organization_id: str
     endpoint_count: int
     health_counts: dict[str, int]
+    state_counts: dict[str, int]
     incident_count: int
     open_incident_count: int
+    sample_data: bool = False
+
+
+class DeviceInventoryResponse(BaseModel):
+    organization_id: str
+    devices: list[EndpointHealthResponse]
     sample_data: bool = False
